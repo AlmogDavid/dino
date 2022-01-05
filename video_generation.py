@@ -21,14 +21,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torchvision
 from torchvision import transforms as pth_transforms
 import numpy as np
 from PIL import Image
 
-import utils
-import vision_transformer as vits
-
+from models import vision_transformer as vits
 
 FOURCC = {
     "mp4": cv2.VideoWriter_fourcc(*"MP4V"),

@@ -31,8 +31,7 @@ from torchvision import transforms as pth_transforms
 import numpy as np
 from PIL import Image
 
-import utils
-import vision_transformer as vits
+from models import vision_transformer as vits
 
 
 def apply_mask(image, mask, color, alpha=0.5):

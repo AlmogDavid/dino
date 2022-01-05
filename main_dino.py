@@ -29,10 +29,12 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
+from torchvision.transforms import InterpolationMode
 
 import utils
-import vision_transformer as vits
-from vision_transformer import DINOHead
+from models import vision_transformer as vits
+from models import swin_transformer as swins
+from models.vision_transformer import DINOHead
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -44,7 +46,7 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
         choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
-                + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
+                + torchvision_archs + torch.hub.list("facebookresearch/xcit:main") + ['swin_small', 'swin_tiny'],
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
@@ -165,6 +167,20 @@ def train_dino(args):
         )
         teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
         embed_dim = student.embed_dim
+    elif args.arch in swins.__dict__.keys():
+        student = swins.__dict__[args.arch](
+            patch_size=args.patch_size,
+            drop_path_rate=args.drop_path_rate,
+        )
+        teacher = swins.__dict__[args.arch](patch_size=args.patch_size)
+        embed_dim = teacher.num_features_last
+        student.head = DINOHead(
+            student.num_features_last,
+            args.out_dim,
+            use_bn=args.use_bn_in_head,
+            norm_last_layer=args.norm_last_layer,
+        )
+        teacher.head = DINOHead(teacher.num_features_last, args.out_dim, args.use_bn_in_head)
     # if the network is a XCiT
     elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
         student = torch.hub.load('facebookresearch/xcit:main', args.arch,
@@ -433,14 +449,14 @@ class DataAugmentationDINO(object):
 
         # first global crop
         self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(1.0),
             normalize,
         ])
         # second global crop
         self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
@@ -449,7 +465,7 @@ class DataAugmentationDINO(object):
         # transformation for the local small crops
         self.local_crops_number = local_crops_number
         self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(p=0.5),
             normalize,

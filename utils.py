@@ -25,12 +25,15 @@ import random
 import datetime
 import subprocess
 from collections import defaultdict, deque
+from typing import List, Union
 
 import numpy as np
 import torch
 from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
+
+from models.swin_transformer import SwinTransformer
 
 
 class GaussianBlur(object):
@@ -600,12 +603,13 @@ class MultiCropWrapper(nn.Module):
     concatenate all the output features and run the head forward on these
     concatenated features.
     """
-    def __init__(self, backbone, head):
+    def __init__(self, backbone, head: Union["DINOHead", List["DINOHead"]]):
         super(MultiCropWrapper, self).__init__()
         # disable layers dedicated to ImageNet labels classification
         backbone.fc, backbone.head = nn.Identity(), nn.Identity()
         self.backbone = backbone
         self.head = head
+        self.is_swin_module = isinstance(backbone, SwinTransformer)
 
     def forward(self, x):
         # convert to list
@@ -617,16 +621,26 @@ class MultiCropWrapper(nn.Module):
         )[1], 0)
         start_idx, output = 0, torch.empty(0).to(x[0].device)
         for end_idx in idx_crops:
-            _out = self.backbone(torch.cat(x[start_idx: end_idx]))
-            # The output is a tuple with XCiT model. See:
-            # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
-            if isinstance(_out, tuple):
+            if self.is_swin_module:
+                _out = self.backbone(torch.cat(x[start_idx: end_idx]), f_type='segment') # 1 out per view
                 _out = _out[0]
-            # accumulate outputs
-            output = torch.cat((output, _out))
+            else:
+                _out = self.backbone(torch.cat(x[start_idx: end_idx]))
+                # The output is a tuple with XCiT model. See:
+                # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
+                if isinstance(_out, tuple):
+                    _out = _out[0]
+                # accumulate outputs
+                output = torch.cat((output, _out))
             start_idx = end_idx
-        # Run the head forward on the concatenated features.
-        return self.head(output)
+
+        final_output = None
+        if self.is_swin_module:
+            pass
+        else:
+            # Run the head forward on the concatenated features.
+            final_output = self.head(output)
+        return final_output
 
 
 def get_params_groups(model):

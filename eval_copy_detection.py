@@ -13,21 +13,18 @@
 # limitations under the License.
 import os
 import sys
-import pickle
 import argparse
 
 import torch
 from torch import nn
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
-from torchvision import models as torchvision_models
 from torchvision import transforms as pth_transforms
-from PIL import Image, ImageFile
+from PIL import Image
 import numpy as np
 
 import utils
-import vision_transformer as vits
-from eval_knn import extract_features
+from models import vision_transformer as vits
 
 
 class CopydaysDataset():
