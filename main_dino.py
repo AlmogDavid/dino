@@ -31,7 +31,6 @@ from torchvision.transforms import Compose
 import utils
 from dino_cpc.loss import DINOLossCPC
 from dino_cpc.transforms import MinimalSizeResize
-from dino_cpc.utils import PatchMatcher
 
 from dino_cpc.transforms import DataAugmentationDINOCPC
 from models import swin_transformer as swins
