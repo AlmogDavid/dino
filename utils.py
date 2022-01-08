@@ -25,7 +25,7 @@ import random
 import datetime
 import subprocess
 from collections import defaultdict, deque
-from typing import List, Union
+from typing import List, Union, Dict
 
 import numpy as np
 import torch
@@ -603,7 +603,7 @@ class MultiCropWrapper(nn.Module):
     concatenate all the output features and run the head forward on these
     concatenated features.
     """
-    def __init__(self, backbone, head: Union["DINOHead", List["DINOHead"]]):
+    def __init__(self, backbone, head: Union["DINOHead", Dict[int, "DINOHead"]]):
         super(MultiCropWrapper, self).__init__()
         # disable layers dedicated to ImageNet labels classification
         backbone.fc, backbone.head = nn.Identity(), nn.Identity()
@@ -615,15 +615,15 @@ class MultiCropWrapper(nn.Module):
         # convert to list
         if not isinstance(x, list):
             x = [x]
-        idx_crops = torch.cumsum(torch.unique_consecutive(
-            torch.tensor([inp.shape[-1] for inp in x]),
-            return_counts=True,
-        )[1], 0)
-        start_idx, output = 0, torch.empty(0).to(x[0].device)
+        unique_res, unique_res_count = torch.unique_consecutive(torch.tensor([inp.shape[-1] for inp in x]), return_counts=True)
+        idx_crops = torch.cumsum(unique_res_count, 0)
+        start_idx = 0
+        output = [] if self.is_swin_module else torch.empty(0).to(x[0].device)
         for end_idx in idx_crops:
             if self.is_swin_module:
                 _out = self.backbone(torch.cat(x[start_idx: end_idx]), f_type='segment') # 1 out per view
                 _out = _out[0]
+                output.append(_out)
             else:
                 _out = self.backbone(torch.cat(x[start_idx: end_idx]))
                 # The output is a tuple with XCiT model. See:
@@ -636,7 +636,16 @@ class MultiCropWrapper(nn.Module):
 
         final_output = None
         if self.is_swin_module:
-            pass
+            final_output = []
+            for curr_res, curr_res_out in zip(unique_res, output):
+                for i, layer_out in enumerate(curr_res_out):
+                    head = self.head[f"{curr_res.item()}_{i}"]
+                    batch_size, dim_size, num_patch = layer_out.shape[:3]
+                    layer_out = layer_out.permute([0, 2, 3, 1]) # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, DIM]
+                    layer_out = layer_out.reshape([-1, dim_size]) # [B * NUM_PATCHES_ROW ** 2, DIM]
+                    layer_out = head(layer_out) # Compute the output -> [B * NUM_PATCHES_ROW ** 2, OUT_DIM]
+                    layer_out = layer_out.view([batch_size, num_patch, num_patch, -1])  # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, OUT_DIM]
+                    final_output.append(layer_out)
         else:
             # Run the head forward on the concatenated features.
             final_output = self.head(output)

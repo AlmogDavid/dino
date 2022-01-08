@@ -21,60 +21,61 @@ import json
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 import torch
 import torch.nn as nn
-import torch.distributed as dist
 import torch.backends.cudnn as cudnn
-import torch.nn.functional as F
-from torchvision import datasets, transforms
+from torchvision import datasets
 from torchvision import models as torchvision_models
-from torchvision.transforms import InterpolationMode
+from torchvision.transforms import Compose
 
 import utils
-from models import vision_transformer as vits
+from dino_cpc.loss import DINOLossCPC
+from dino_cpc.transforms import MinimalSizeResize
+from dino_cpc.utils import PatchMatcher
+
+from dino_cpc.transforms import DataAugmentationDINOCPC
 from models import swin_transformer as swins
 from models.vision_transformer import DINOHead
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(torchvision_models.__dict__[name]))
+                           if name.islower() and not name.startswith("__")
+                           and callable(torchvision_models.__dict__[name]))
+
 
 def get_args_parser():
+    # TODO: remove all the transformers from this code, keep only swin (the code is broken from the others)
     parser = argparse.ArgumentParser('DINO', add_help=False)
 
     # Model parameters
-    parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
-                + torchvision_archs + torch.hub.list("facebookresearch/xcit:main") + ['swin_small', 'swin_tiny'],
-        help="""Name of architecture to train. For quick experiments with ViTs,
+    parser.add_argument('--arch', default='swin_small', type=str,
+                        choices=['swin_small', 'swin_tiny'],
+                        help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
-        values leads to better performance but requires more memory. Applies only
-        for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
+        values leads to better performance but requires more memory. If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
-    parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
-        the DINO head output. For complex and large datasets large values (like 65k) work well.""")
+    parser.add_argument('--out_dim', default=(65536//16,65536//8,65536//4,65536//2), type=int, nargs=4, help="""Dimensionality of
+        the DINO head output. For complex and large datasets large values (like 65k) work well, one for each level""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
-        help="""Whether or not to weight normalize the last layer of the DINO head.
+                        help="""Whether or not to weight normalize the last layer of the DINO head.
         Not normalizing leads to better performance but can make the training unstable.
         In our experiments, we typically set this paramater to False with vit_small and True with vit_base.""")
     parser.add_argument('--momentum_teacher', default=0.996, type=float, help="""Base EMA
         parameter for teacher update. The value is increased to 1 during training with cosine schedule.
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag,
-        help="Whether to use batch normalizations in projection head (Default: False)")
+                        help="Whether to use batch normalizations in projection head (Default: False)")
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
-        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
+                        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
         Try decreasing it if the training loss does not decrease.""")
     parser.add_argument('--teacher_temp', default=0.04, type=float, help="""Final value (after linear warmup)
         of the teacher temperature. For most experiments, anything above 0.07 is unstable. We recommend
         starting with the default value of 0.04 and increase this slightly if needed.""")
     parser.add_argument('--warmup_teacher_temp_epochs', default=0, type=int,
-        help='Number of warmup epochs for the teacher temperature (Default: 30).')
+                        help='Number of warmup epochs for the teacher temperature (Default: 30).')
 
     # Training/Optimization parameters
     parser.add_argument('--use_fp16', type=utils.bool_flag, default=True, help="""Whether or not
@@ -90,7 +91,7 @@ def get_args_parser():
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
     parser.add_argument('--batch_size_per_gpu', default=64, type=int,
-        help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
+                        help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
@@ -99,28 +100,25 @@ def get_args_parser():
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
     parser.add_argument("--warmup_epochs", default=10, type=int,
-        help="Number of epochs for the linear learning-rate warm up.")
+                        help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
     parser.add_argument('--optimizer', default='adamw', type=str,
-        choices=['adamw', 'sgd', 'lars'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
+                        choices=['adamw', 'sgd', 'lars'],
+                        help="""Type of optimizer. We recommend using adamw with ViTs.""")
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
+    parser.add_argument('--max_pairs', type=int, nargs=4, default=(32, 32, 32, 32), help="Maximum number of pairs to take at each layer")
 
     # Multi-crop parameters
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
-        Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
-        recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
     parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
-    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
-        Used for small local view cropping of multi-crop.""")
+    parser.add_argument('--global_crop_size', type=int, default=192, help="The size of the global crop")
+    parser.add_argument('--local_crop_size', type=int, default=96, help="The size of the local crop")
 
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
-        help='Please specify path to the ImageNet training data.')
+                        help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
@@ -138,74 +136,48 @@ def train_dino(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
-    # ============ preparing data ... ============
-    transform = DataAugmentationDINO(
-        args.global_crops_scale,
-        args.local_crops_scale,
-        args.local_crops_number,
-    )
-    dataset = datasets.ImageFolder(args.data_path, transform=transform)
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        sampler=sampler,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-    print(f"Data loaded: there are {len(dataset)} images.")
-
     # ============ building student and teacher networks ... ============
-    # we changed the name DeiT-S for ViT-S to avoid confusions
-    args.arch = args.arch.replace("deit", "vit")
-    # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
-    if args.arch in vits.__dict__.keys():
-        student = vits.__dict__[args.arch](
-            patch_size=args.patch_size,
-            drop_path_rate=args.drop_path_rate,  # stochastic depth
-        )
-        teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
-        embed_dim = student.embed_dim
-    elif args.arch in swins.__dict__.keys():
+    if args.arch in swins.__dict__.keys():
         student = swins.__dict__[args.arch](
+            img_size=args.global_crop_size,
             patch_size=args.patch_size,
             drop_path_rate=args.drop_path_rate,
         )
-        teacher = swins.__dict__[args.arch](patch_size=args.patch_size)
-        embed_dim = teacher.num_features_last
-        student.head = DINOHead(
-            student.num_features_last,
-            args.out_dim,
-            use_bn=args.use_bn_in_head,
-            norm_last_layer=args.norm_last_layer,
-        )
-        teacher.head = DINOHead(teacher.num_features_last, args.out_dim, args.use_bn_in_head)
-    # if the network is a XCiT
-    elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
-        student = torch.hub.load('facebookresearch/xcit:main', args.arch,
-                                 pretrained=False, drop_path_rate=args.drop_path_rate)
-        teacher = torch.hub.load('facebookresearch/xcit:main', args.arch, pretrained=False)
-        embed_dim = student.embed_dim
-    # otherwise, we check if the architecture is in torchvision models
-    elif args.arch in torchvision_models.__dict__.keys():
-        student = torchvision_models.__dict__[args.arch]()
-        teacher = torchvision_models.__dict__[args.arch]()
-        embed_dim = student.fc.weight.shape[1]
+        teacher = swins.__dict__[args.arch](patch_size=args.patch_size,
+                                            img_size=args.global_crop_size)
+        student.head = None  # Multi cropper makes it identity so no need to assign it
+        teacher.head = None
     else:
-        print(f"Unknow architecture: {args.arch}")
+        raise RuntimeError(f"Unknow architecture: {args.arch}")
 
     # multi-crop wrapper handles forward with inputs of different resolutions
-    student = utils.MultiCropWrapper(student, DINOHead(
-        embed_dim,
-        args.out_dim,
-        use_bn=args.use_bn_in_head,
-        norm_last_layer=args.norm_last_layer,
-    ))
-    teacher = utils.MultiCropWrapper(
-        teacher,
-        DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
-    )
+    student_head = torch.nn.ModuleDict()
+    teacher_head = torch.nn.ModuleDict()
+    with torch.no_grad():
+        for curr_res in (args.global_crop_size, args.local_crop_size):
+            # Run dummy input in order to understand the dimensions of the embeddings and the crops coordinates
+            out_agg = student(torch.rand(1, 3, curr_res, curr_res))[0]
+            res_config = []
+            patch_size = student.patch_embed.patch_size
+            assert patch_size[0] == patch_size[1], "Patches must be symmetric"
+            for i, out in enumerate(out_agg):  # out layout: [batch, dim, num_patches_w, num_patches_h]
+                dim = out.size(-3)
+                res_config.append(dim)
+
+            for i, curr_dim in enumerate(res_config):
+                #  Although the teacher does not need all the dino heads as the student because it see only the global scales
+                #  We still add the heads inorder to make the networks identical
+                teacher_head[f"{curr_res}_{i}"] = DINOHead(in_dim=curr_dim,
+                                        out_dim=args.out_dim[i],
+                                        use_bn=args.use_bn_in_head,
+                                        norm_last_layer=True)
+                student_head[f"{curr_res}_{i}"] = DINOHead(in_dim=curr_dim,
+                                        out_dim=args.out_dim[i],
+                                        use_bn=args.use_bn_in_head,
+                                        norm_last_layer=args.norm_last_layer)
+    student = utils.MultiCropWrapper(student, student_head)
+    teacher = utils.MultiCropWrapper(teacher, teacher_head)
+
     # move networks to gpu
     student, teacher = student.cuda(), teacher.cuda()
     # synchronize batch norms (if any)
@@ -227,15 +199,31 @@ def train_dino(args):
         p.requires_grad = False
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
+    # ============ preparing data ... ============
+    assert args.global_crop_size // args.local_crop_size == args.global_crop_size / args.local_crop_size, "The global crop should be a multiplication of the local crop size so we can compare the patches"
+    maximal_patch_size = args.patch_size * (2**(student.module.backbone.num_layers - 1))
+    transform = Compose([
+        MinimalSizeResize(minimal_size=int(args.global_crop_size * 1.5),
+                          patch_size=maximal_patch_size), # TODO: make it random resize between ranges, merge it into DataAugmentationDINOCPC ?
+        DataAugmentationDINOCPC(local_crops_number=args.local_crops_number,
+                                global_crop_size=args.global_crop_size,
+                                local_crop_size=args.local_crop_size,
+                                maximal_patch_size=maximal_patch_size)
+    ])
+    dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        sampler=sampler,
+        batch_size=args.batch_size_per_gpu,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+    print(f"Data loaded: there are {len(dataset)} images.")
+
     # ============ preparing loss ... ============
-    dino_loss = DINOLoss(
-        args.out_dim,
-        args.local_crops_number + 2,  # total number of crops = 2 global crops + local_crops_number
-        args.warmup_teacher_temp,
-        args.teacher_temp,
-        args.warmup_teacher_temp_epochs,
-        args.epochs,
-    ).cuda()
+    dino_loss = DINOLossCPC(args=args)
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -287,8 +275,8 @@ def train_dino(args):
 
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
-            data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, args)
+                                      data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
+                                      epoch, fp16_scaler, args)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -315,11 +303,11 @@ def train_dino(args):
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
-                    optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
+                    optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
                     fp16_scaler, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -333,7 +321,13 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
-            loss = dino_loss(student_output, teacher_output, epoch)
+            loss = dino_loss(student_output,
+                             teacher_output,
+                             crops_bbox.cuda(),
+                             crops_flipped.cuda(),
+                             orig_img_size.cuda(),
+                             epoch,
+                             args)
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -376,108 +370,52 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-class DINOLoss(nn.Module):
-    def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
-                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
-                 center_momentum=0.9):
-        super().__init__()
-        self.student_temp = student_temp
-        self.center_momentum = center_momentum
-        self.ncrops = ncrops
-        self.register_buffer("center", torch.zeros(1, out_dim))
-        # we apply a warm up for the teacher temperature because
-        # a too high temperature makes the training instable at the beginning
-        self.teacher_temp_schedule = np.concatenate((
-            np.linspace(warmup_teacher_temp,
-                        teacher_temp, warmup_teacher_temp_epochs),
-            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
-        ))
-
-    def forward(self, student_output, teacher_output, epoch):
-        """
-        Cross-entropy between softmax outputs of the teacher and student networks.
-        """
-        student_out = student_output / self.student_temp
-        student_out = student_out.chunk(self.ncrops)
-
-        # teacher centering and sharpening
-        temp = self.teacher_temp_schedule[epoch]
-        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(2)
-
-        total_loss = 0
-        n_loss_terms = 0
-        for iq, q in enumerate(teacher_out):
-            for v in range(len(student_out)):
-                if v == iq:
-                    # we skip cases where student and teacher operate on the same view
-                    continue
-                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
-                total_loss += loss.mean()
-                n_loss_terms += 1
-        total_loss /= n_loss_terms
-        self.update_center(teacher_output)
-        return total_loss
-
-    @torch.no_grad()
-    def update_center(self, teacher_output):
-        """
-        Update center used for teacher output.
-        """
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        dist.all_reduce(batch_center)
-        batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
-
-        # ema update
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
-
-
-class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
-        flip_and_color_jitter = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                p=0.8
-            ),
-            transforms.RandomGrayscale(p=0.2),
-        ])
-        normalize = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-        ])
-
-        # first global crop
-        self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(1.0),
-            normalize,
-        ])
-        # second global crop
-        self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(0.1),
-            utils.Solarization(0.2),
-            normalize,
-        ])
-        # transformation for the local small crops
-        self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(p=0.5),
-            normalize,
-        ])
-
-    def __call__(self, image):
-        crops = []
-        crops.append(self.global_transfo1(image))
-        crops.append(self.global_transfo2(image))
-        for _ in range(self.local_crops_number):
-            crops.append(self.local_transfo(image))
-        return crops
+# class DataAugmentationDINO(object):
+#     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
+#         flip_and_color_jitter = transforms.Compose([
+#             transforms.RandomHorizontalFlip(p=0.5),
+#             transforms.RandomApply(
+#                 [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
+#                 p=0.8
+#             ),
+#             transforms.RandomGrayscale(p=0.2),
+#         ])
+#         normalize = transforms.Compose([
+#             transforms.ToTensor(),
+#             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+#         ])
+#
+#         # first global crop
+#         self.global_transfo1 = transforms.Compose([
+#             transforms.RandomResizedCrop(args.global_crop_size, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+#             flip_and_color_jitter,
+#             utils.GaussianBlur(1.0),
+#             normalize,
+#         ])
+#         # second global crop
+#         self.global_transfo2 = transforms.Compose([
+#             transforms.RandomResizedCrop(args.global_crop_size, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
+#             flip_and_color_jitter,
+#             utils.GaussianBlur(0.1),
+#             utils.Solarization(0.2),
+#             normalize,
+#         ])
+#         # transformation for the local small crops
+#         self.local_crops_number = local_crops_number
+#         self.local_transfo = transforms.Compose([
+#             transforms.RandomResizedCrop(args.local_crop_size, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
+#             flip_and_color_jitter,
+#             utils.GaussianBlur(p=0.5),
+#             normalize,
+#         ])
+#
+#     def __call__(self, image):
+#         crops = []
+#         crops.append(self.global_transfo1(image))
+#         crops.append(self.global_transfo2(image))
+#         for _ in range(self.local_crops_number):
+#             crops.append(self.local_transfo(image))
+#         return crops
 
 
 if __name__ == '__main__':

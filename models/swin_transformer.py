@@ -185,6 +185,7 @@ class SwinTransformerBlock(nn.Module):
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
+        assert shift_size == 0, "Currently the code of matching crops works without any shift"
         self.dim = dim
         self.num_heads = num_heads
         self.window_size = window_size
@@ -341,7 +342,7 @@ class BasicLayer(nn.Module):
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(dim=dim,
                                  num_heads=num_heads, window_size=window_size,
-                                 shift_size=0,
+                                 shift_size=0, # 0 if (i % 2 == 0) else window_size // 2, # TODO: need to support shifting window, need to consider the patch matching code
                                  mlp_ratio=mlp_ratio,
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
@@ -431,6 +432,7 @@ class PatchEmbed(nn.Module):
         """Forward function."""
         # padding
         _, _, H, W = x.size()
+        assert W % self.patch_size[1] == 0 and H % self.patch_size[0] == 0, "DINOCPC does not support padding for its calculations"
         if W % self.patch_size[1] != 0:
             x = F.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
         if H % self.patch_size[0] != 0:
@@ -472,8 +474,8 @@ class SwinTransformer(nn.Module):
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
     """
 
-    def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000, embed_dim=96, depths=[2, 2, 6, 2],
-                 num_heads=[3, 6, 12, 24], window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0.,
+    def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000, embed_dim=96, depths=(2, 2, 6, 2),
+                 num_heads=(3, 6, 12, 24), window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0.,
                  attn_drop_rate=0., drop_path_rate=0.1, norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  out_indices=(0, 1, 2, 3), use_checkpoint=False, **kwargs):
         super().__init__()
