@@ -40,14 +40,16 @@ class DINOLossCPCSingle(nn.Module):
         n_loss_terms = 0
         for iq, q in enumerate(teacher_out):
             for v in range(len(student_out)):
-                if v == iq:
-                    # we skip cases where student and teacher operate on the same view
-                    continue
+                # ALMOG: this already being done before
+                # if v == iq:
+                #     # we skip cases where student and teacher operate on the same view
+                #     continue
                 loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
                 total_loss += loss.mean()
                 n_loss_terms += 1
-        total_loss /= n_loss_terms
-        self.update_center(teacher_output)
+        if n_loss_terms > 0:
+            total_loss /= n_loss_terms
+            self.update_center(teacher_output)
         return total_loss
 
     @torch.no_grad()
