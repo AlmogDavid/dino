@@ -1,6 +1,12 @@
-from typing import Tuple, List
+from typing import List, Optional
 import torch
-import numpy as np
+
+
+def handle_flips(flips: torch.Tensor, pred: List[torch.Tensor]):
+    for i in range(len(pred)):
+        pred[i][flips] = torch.flip(pred[i][flips], [2])
+
+    return pred
 
 
 class PatchMatcher:

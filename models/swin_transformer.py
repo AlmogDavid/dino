@@ -4,6 +4,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ze Liu
 # --------------------------------------------------------
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -594,7 +595,9 @@ class SwinTransformer(nn.Module):
 
         return tuple(outs)
 
-    def forward(self, x, f_type='segment'):
+    def forward(self,
+                x: torch.Tensor,
+                f_type='segment'):
         assert f_type == 'segment' # For this project only use segment option
         if f_type in ['segment', 'extract_no_pool', 'extract_and_pool']:
             # convert to list

@@ -25,7 +25,7 @@ import random
 import datetime
 import subprocess
 from collections import defaultdict, deque
-from typing import List, Union, Dict
+from typing import List, Union, Dict, Optional
 
 import numpy as np
 import torch
@@ -33,6 +33,7 @@ from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
 
+from dino_cpc.utils import handle_flips
 from models.swin_transformer import SwinTransformer
 
 
@@ -603,15 +604,19 @@ class MultiCropWrapper(nn.Module):
     concatenate all the output features and run the head forward on these
     concatenated features.
     """
-    def __init__(self, backbone, head: Union["DINOHead", Dict[int, "DINOHead"]]):
+    def __init__(self, backbone, head: Union["DINOHead", Dict[int, "DINOHead"]], global_res: int, local_res: int):
         super(MultiCropWrapper, self).__init__()
         # disable layers dedicated to ImageNet labels classification
         backbone.fc, backbone.head = nn.Identity(), nn.Identity()
         self.backbone = backbone
         self.head = head
         self.is_swin_module = isinstance(backbone, SwinTransformer)
+        self.local_res = local_res
+        self.global_res = global_res
 
-    def forward(self, x):
+    def forward(self, x,                 crop_flips: torch.Tensor,
+                local_matches: Optional[List[torch.Tensor]] = None,
+                global_matches: Optional[List[torch.Tensor]] = None,):
         # convert to list
         if not isinstance(x, list):
             x = [x]
@@ -634,18 +639,28 @@ class MultiCropWrapper(nn.Module):
                 output = torch.cat((output, _out))
             start_idx = end_idx
 
-        final_output = None
         if self.is_swin_module:
-            final_output = []
+            final_output = {}
             for curr_res, curr_res_out in zip(unique_res, output):
+                curr_res = curr_res.item()
+                matches = global_matches if curr_res == self.global_res else local_matches
+                res_flips = (crop_flips[:, :2] if curr_res == self.global_res else crop_flips[:, 2:]).reshape(-1)
+                curr_res_out = handle_flips(flips=res_flips, pred=curr_res_out)  # Flip the feature maps so it will match the bbox
+                assert matches is not None
+
+                final_output[curr_res] = []
+
                 for i, layer_out in enumerate(curr_res_out):
-                    head = self.head[f"{curr_res.item()}_{i}"]
+                    head = self.head[f"{curr_res}_{i}"]
                     batch_size, dim_size, num_patch = layer_out.shape[:3]
                     layer_out = layer_out.permute([0, 2, 3, 1]) # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, DIM]
-                    layer_out = layer_out.reshape([-1, dim_size]) # [B * NUM_PATCHES_ROW ** 2, DIM]
-                    layer_out = head(layer_out) # Compute the output -> [B * NUM_PATCHES_ROW ** 2, OUT_DIM]
-                    layer_out = layer_out.view([batch_size, num_patch, num_patch, -1])  # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, OUT_DIM]
-                    final_output.append(layer_out)
+                    layer_out = layer_out.reshape([ -1, dim_size]) # [B * NUM_PATCHES_ROW**2, DIM]
+                    # Select only the relevant matches
+                    relevant_pred_idx = matches[i][:, 0] * (num_patch**2) + matches[i][:, 1]
+                    layer_out = layer_out[relevant_pred_idx]
+
+                    layer_out = head(layer_out)  # Compute the output -> [MATCHES, OUT_DIM]
+                    final_output[curr_res].append(layer_out)
         else:
             # Run the head forward on the concatenated features.
             final_output = self.head(output)

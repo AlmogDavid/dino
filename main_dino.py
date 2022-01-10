@@ -33,6 +33,7 @@ from dino_cpc.loss import DINOLossCPC
 from dino_cpc.transforms import MinimalSizeResize
 
 from dino_cpc.transforms import DataAugmentationDINOCPC
+from dino_cpc.utils import handle_flips, PatchMatcher
 from models import swin_transformer as swins
 from models.vision_transformer import DINOHead
 
@@ -54,7 +55,7 @@ def get_args_parser():
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
-    parser.add_argument('--out_dim', default=(65536//16,65536//8,65536//4,65536//2), type=int, nargs=4, help="""Dimensionality of
+    parser.add_argument('--out_dim', default=(65536 // 16, 65536 // 8, 65536 // 4, 65536 // 2), type=int, nargs=4, help="""Dimensionality of
         the DINO head output. For complex and large datasets large values (like 65k) work well, one for each level""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
                         help="""Whether or not to weight normalize the last layer of the DINO head.
@@ -106,7 +107,8 @@ def get_args_parser():
                         choices=['adamw', 'sgd', 'lars'],
                         help="""Type of optimizer. We recommend using adamw with ViTs.""")
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
-    parser.add_argument('--max_pairs', type=int, nargs=4, default=(32, 32, 32, 32), help="Maximum number of pairs to take at each layer")
+    parser.add_argument('--max_pairs', type=int, nargs=4, default=(512, 512, 512, 512),
+                        help="Maximum number of pairs to take at each layer")
 
     # Multi-crop parameters
     parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
@@ -152,10 +154,12 @@ def train_dino(args):
     # multi-crop wrapper handles forward with inputs of different resolutions
     student_head = torch.nn.ModuleDict()
     teacher_head = torch.nn.ModuleDict()
+    num_patches_map = {}
     with torch.no_grad():
         for curr_res in (args.global_crop_size, args.local_crop_size):
             # Run dummy input in order to understand the dimensions of the embeddings and the crops coordinates
             out_agg = student(torch.rand(1, 3, curr_res, curr_res))[0]
+            num_patches_map[curr_res] = [l.size(2) for l in out_agg]
             res_config = []
             patch_size = student.patch_embed.patch_size
             assert patch_size[0] == patch_size[1], "Patches must be symmetric"
@@ -167,15 +171,15 @@ def train_dino(args):
                 #  Although the teacher does not need all the dino heads as the student because it see only the global scales
                 #  We still add the heads inorder to make the networks identical
                 teacher_head[f"{curr_res}_{i}"] = DINOHead(in_dim=curr_dim,
-                                        out_dim=args.out_dim[i],
-                                        use_bn=args.use_bn_in_head,
-                                        norm_last_layer=True)
+                                                           out_dim=args.out_dim[i],
+                                                           use_bn=args.use_bn_in_head,
+                                                           norm_last_layer=True)
                 student_head[f"{curr_res}_{i}"] = DINOHead(in_dim=curr_dim,
-                                        out_dim=args.out_dim[i],
-                                        use_bn=args.use_bn_in_head,
-                                        norm_last_layer=args.norm_last_layer)
-    student = utils.MultiCropWrapper(student, student_head)
-    teacher = utils.MultiCropWrapper(teacher, teacher_head)
+                                                           out_dim=args.out_dim[i],
+                                                           use_bn=args.use_bn_in_head,
+                                                           norm_last_layer=args.norm_last_layer)
+    student = utils.MultiCropWrapper(student, student_head, args.global_crop_size, args.local_crop_size)
+    teacher = utils.MultiCropWrapper(teacher, teacher_head, args.global_crop_size, args.local_crop_size)
 
     # move networks to gpu
     student, teacher = student.cuda(), teacher.cuda()
@@ -200,10 +204,11 @@ def train_dino(args):
 
     # ============ preparing data ... ============
     assert args.global_crop_size // args.local_crop_size == args.global_crop_size / args.local_crop_size, "The global crop should be a multiplication of the local crop size so we can compare the patches"
-    maximal_patch_size = args.patch_size * (2**(student.module.backbone.num_layers - 1))
+    maximal_patch_size = args.patch_size * (2 ** (student.module.backbone.num_layers - 1))
     transform = Compose([
         MinimalSizeResize(minimal_size=int(args.global_crop_size * 1.5),
-                          patch_size=maximal_patch_size), # TODO: make it random resize between ranges, merge it into DataAugmentationDINOCPC ?
+                          patch_size=maximal_patch_size),
+        # TODO: make it random resize between ranges, merge it into DataAugmentationDINOCPC ?
         DataAugmentationDINOCPC(local_crops_number=args.local_crops_number,
                                 global_crop_size=args.global_crop_size,
                                 local_crop_size=args.local_crop_size,
@@ -275,7 +280,7 @@ def train_dino(args):
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-                                      epoch, fp16_scaler, args)
+                                      epoch, fp16_scaler, args, num_patches_map)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -303,10 +308,11 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
-                    fp16_scaler, args):
+                    fp16_scaler, args, patches_map):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(
+            metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -314,17 +320,68 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             if i == 0:  # only the first group is regularized
                 param_group["weight_decay"] = wd_schedule[it]
 
-        # move images to gpu
+        # move data to gpu
         images = [im.cuda(non_blocking=True) for im in images]
+        crops_bbox = crops_bbox.cuda()
+        crops_flipped = crops_flipped.cuda()
+        orig_img_size = orig_img_size.cuda()
+
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
-            student_output = student(images)
-            loss = dino_loss(student_output,
-                             teacher_output,
-                             crops_bbox.cuda(),
-                             crops_flipped.cuda(),
-                             orig_img_size.cuda(),
+            # Find out what we need to calculate
+            global_bbox = crops_bbox[:, :2, :].reshape(-1, 4)  # First 2 are the global boxes
+            local_bbox = crops_bbox[:, 2:, :].reshape(-1, 4)  # The rest are local
+
+            # Reshape inputs so they will have batch dim
+            batch_size = args.batch_size_per_gpu
+            global_bbox = global_bbox.view(batch_size, -1, 4)
+            local_bbox = local_bbox.view(batch_size, -1, 4)
+
+            relevant_matches_local_global = []
+            relevant_matches_global_global = []
+
+            # Now we check which local boxes matches the global boxes and compute the loss between them as well
+            for lvl_idx, num_pairs_to_grab in enumerate(args.max_pairs):
+                matches_local_global = PatchMatcher.find_matches(crop_a=local_bbox,
+                                                                 crop_size_a=args.local_crop_size,
+                                                                 num_patches_a=patches_map[args.local_crop_size][lvl_idx],
+                                                                 crop_b=global_bbox,
+                                                                 crop_size_b=args.global_crop_size,
+                                                                 num_patches_b=patches_map[args.global_crop_size][lvl_idx])
+
+                matches_global_global = PatchMatcher.find_matches(crop_a=global_bbox,
+                                                                  crop_size_a=args.global_crop_size,
+                                                                  num_patches_a=patches_map[args.global_crop_size][lvl_idx],
+                                                                  crop_b=global_bbox,
+                                                                  crop_size_b=args.global_crop_size,
+                                                                  num_patches_b=patches_map[args.global_crop_size][lvl_idx])
+                # Remove all global matches which matches the same view, because its not interesting
+                matches_global_global = matches_global_global[
+                    matches_global_global[:, 0] != matches_global_global[:, 2]]
+
+                # Take subset
+                for curr_matches, rel_matches in ((matches_local_global, relevant_matches_local_global),
+                                                  (matches_global_global, relevant_matches_global_global)):
+                    perm = torch.randperm(curr_matches.size(0))
+                    idx = perm[:args.max_pairs[lvl_idx]]
+                    rel_matches.append(curr_matches[idx])
+
+            teacher_relevant_matches_global = [torch.cat([r1[:,2:], r2[:,2:]], dim=0) for r1,r2 in zip(relevant_matches_local_global, relevant_matches_global_global)]
+            student_relevant_matches_local = [r[:, :2] for r in relevant_matches_local_global]
+            student_relevant_matches_global = [r[:, :2] for r in relevant_matches_global_global]
+
+            teacher_output = teacher(images[:2], crops_flipped, global_matches=teacher_relevant_matches_global)  # only the 2 global views pass through the teacher
+            student_output = student(images, crops_flipped, local_matches=student_relevant_matches_local, global_matches=student_relevant_matches_global)
+
+            global_match_student_pred = student_output[args.global_crop_size]
+            local_match_student_pred = student_output[args.local_crop_size]
+            local_match_teacher_pred = [o[:local_match_student_pred[i].size(0), :] for i, o in enumerate(teacher_output[args.global_crop_size])]
+            global_match_teacher_pred = [o[local_match_student_pred[i].size(0):, :] for i, o in enumerate(teacher_output[args.global_crop_size])]
+
+            loss = dino_loss(global_match_student_pred,
+                             local_match_student_pred,
+                             local_match_teacher_pred,
+                             global_match_teacher_pred,
                              epoch,
                              args)
 
