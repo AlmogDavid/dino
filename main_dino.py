@@ -432,7 +432,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+    stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    stats['it'] = metric_logger.it
+
+    return stats
 
 
 def save_args(args: argparse.Namespace):
