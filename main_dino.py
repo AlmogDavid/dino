@@ -448,4 +448,6 @@ if __name__ == '__main__':
     args.output_dir = os.path.join(args.output_dir, f"{args.exp_name}_{timestampStr}") # This code breaks the ability to revive workers
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
+    save_args(args)
+
     train_dino(args)
