@@ -75,10 +75,18 @@ class DINOLossCPC(nn.Module):
                  args: argparse.Namespace
                  ):
         loss = 0
+        sep_loss = []
         for i in range(len(global_match_teacher_pred)):
+            curr_lvl_loss = 0
             for student_p, teacher_p in ((global_match_student_pred[i], global_match_teacher_pred[i]),
                                          (local_match_student_pred[i], local_match_teacher_pred[i])):
-                loss += self.dino_loss[i](student_output=student_p,
+                curr_loss = self.dino_loss[i](student_output=student_p,
                                         teacher_output=teacher_p,
                                         epoch=epoch)
-        return loss
+                curr_lvl_loss += curr_loss
+            curr_lvl_loss = curr_lvl_loss / 2 # Mean between the global global and local global
+            loss += curr_lvl_loss
+            sep_loss.append(curr_lvl_loss.detach().cpu().item())
+
+        loss = loss / len(global_match_teacher_pred) # Mean over all the levels
+        return loss, sep_loss

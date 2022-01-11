@@ -27,6 +27,7 @@ import torch.backends.cudnn as cudnn
 from torchvision import datasets
 from torchvision import models as torchvision_models
 from torchvision.transforms import Compose
+from torch.utils.tensorboard import SummaryWriter
 
 import utils
 from dino_cpc.loss import DINOLossCPC
@@ -46,12 +47,14 @@ def get_args_parser():
     # TODO: remove all the transformers from this code, keep only swin (the code is broken from the others)
     parser = argparse.ArgumentParser('DINO', add_help=False)
 
+    parser.add_argument("--exp_name", required=True, help="The experiment name")
+
     # Model parameters
     parser.add_argument('--arch', default='swin_small', type=str,
                         choices=['swin_small', 'swin_tiny'],
                         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
-    parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
+    parser.add_argument('--patch_size', default=4, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
@@ -90,9 +93,9 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=64, type=int,
+    parser.add_argument('--batch_size_per_gpu', default=32, type=int,
                         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
-    parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
+    parser.add_argument('--epochs', default=1000, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
@@ -114,14 +117,14 @@ def get_args_parser():
     parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
-    parser.add_argument('--global_crop_size', type=int, default=192, help="The size of the global crop")
+    parser.add_argument('--global_crop_size', type=int, default=224, help="The size of the global crop")
     parser.add_argument('--local_crop_size', type=int, default=96, help="The size of the local crop")
 
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
                         help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--saveckp_freq', default=5, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
@@ -203,10 +206,10 @@ def train_dino(args):
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
     # ============ preparing data ... ============
-    assert args.global_crop_size // args.local_crop_size == args.global_crop_size / args.local_crop_size, "The global crop should be a multiplication of the local crop size so we can compare the patches"
+    #assert args.global_crop_size // args.local_crop_size == args.global_crop_size / args.local_crop_size, "The global crop should be a multiplication of the local crop size so we can compare the patches"
     maximal_patch_size = args.patch_size * (2 ** (student.module.backbone.num_layers - 1))
     transform = Compose([
-        MinimalSizeResize(minimal_size=int(args.global_crop_size * 1.5),
+        MinimalSizeResize(minimal_size=maximal_patch_size * 10,
                           patch_size=maximal_patch_size),
         # TODO: make it random resize between ranges, merge it into DataAugmentationDINOCPC ?
         DataAugmentationDINOCPC(local_crops_number=args.local_crops_number,
@@ -272,16 +275,20 @@ def train_dino(args):
     )
     start_epoch = to_restore["epoch"]
 
+    writer = SummaryWriter(log_dir=args.output_dir) if utils.is_main_process() else None
+
+
     start_time = time.time()
     print("Starting DINO training !")
+    it = 0
     for epoch in range(start_epoch, args.epochs):
         data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-                                      epoch, fp16_scaler, args, num_patches_map)
-
+                                      epoch, fp16_scaler, args, num_patches_map, writer, it, args.exp_name)
+        it = train_stats['it']
         # ============ writing logs ... ============
         save_dict = {
             'student': student.state_dict(),
@@ -308,13 +315,13 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
-                    fp16_scaler, args, patches_map):
-    metric_logger = utils.MetricLogger(delimiter="  ")
+                    fp16_scaler, args, patches_map, writer, it, experiment_name):
+    metric_logger = utils.MetricLogger(delimiter="  ", writer=writer, it=it, experiment_name=experiment_name)
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(
+    for _, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(
             metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
-        it = len(data_loader) * epoch + it  # global training iteration
+        it = metric_logger.it
         for i, param_group in enumerate(optimizer.param_groups):
             param_group["lr"] = lr_schedule[it]
             if i == 0:  # only the first group is regularized
@@ -324,7 +331,6 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         images = [im.cuda(non_blocking=True) for im in images]
         crops_bbox = crops_bbox.cuda()
         crops_flipped = crops_flipped.cuda()
-        orig_img_size = orig_img_size.cuda()
 
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
@@ -378,7 +384,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             local_match_teacher_pred = [o[:local_match_student_pred[i].size(0), :] for i, o in enumerate(teacher_output[args.global_crop_size])]
             global_match_teacher_pred = [o[local_match_student_pred[i].size(0):, :] for i, o in enumerate(teacher_output[args.global_crop_size])]
 
-            loss = dino_loss(global_match_student_pred,
+            loss, sep_loss = dino_loss(global_match_student_pred,
                              local_match_student_pred,
                              local_match_teacher_pred,
                              global_match_teacher_pred,
@@ -418,64 +424,28 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
+        metric_logger.update(**{f"loss_lvl_{i}": lvl_loss for i, lvl_loss in enumerate(sep_loss)})
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
+
+        metric_logger.finish_step()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-# class DataAugmentationDINO(object):
-#     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
-#         flip_and_color_jitter = transforms.Compose([
-#             transforms.RandomHorizontalFlip(p=0.5),
-#             transforms.RandomApply(
-#                 [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-#                 p=0.8
-#             ),
-#             transforms.RandomGrayscale(p=0.2),
-#         ])
-#         normalize = transforms.Compose([
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-#         ])
-#
-#         # first global crop
-#         self.global_transfo1 = transforms.Compose([
-#             transforms.RandomResizedCrop(args.global_crop_size, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
-#             flip_and_color_jitter,
-#             utils.GaussianBlur(1.0),
-#             normalize,
-#         ])
-#         # second global crop
-#         self.global_transfo2 = transforms.Compose([
-#             transforms.RandomResizedCrop(args.global_crop_size, scale=global_crops_scale, interpolation=InterpolationMode.BICUBIC),
-#             flip_and_color_jitter,
-#             utils.GaussianBlur(0.1),
-#             utils.Solarization(0.2),
-#             normalize,
-#         ])
-#         # transformation for the local small crops
-#         self.local_crops_number = local_crops_number
-#         self.local_transfo = transforms.Compose([
-#             transforms.RandomResizedCrop(args.local_crop_size, scale=local_crops_scale, interpolation=InterpolationMode.BICUBIC),
-#             flip_and_color_jitter,
-#             utils.GaussianBlur(p=0.5),
-#             normalize,
-#         ])
-#
-#     def __call__(self, image):
-#         crops = []
-#         crops.append(self.global_transfo1(image))
-#         crops.append(self.global_transfo2(image))
-#         for _ in range(self.local_crops_number):
-#             crops.append(self.local_transfo(image))
-#         return crops
-
+def save_args(args: argparse.Namespace):
+    args_dict = vars(args)
+    with open(os.path.join(args.output_dir, "input_args.json"), "w") as out_file:
+        json.dump(args_dict, out_file)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
+    dateTimeObj = datetime.datetime.now()
+    timestampStr = dateTimeObj.strftime("%Y%m%d_%H%M%S")
+    args.output_dir = os.path.join(args.output_dir, f"{args.exp_name}_{timestampStr}") # This code breaks the ability to revive workers
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
     train_dino(args)

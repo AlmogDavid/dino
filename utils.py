@@ -32,6 +32,8 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from dino_cpc.utils import handle_flips
 from models.swin_transformer import SwinTransformer
@@ -315,16 +317,30 @@ def reduce_dict(input_dict, average=True):
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\t", writer=None, it=0, experiment_name=''):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.it = it
+        self.writer = writer
+        self.experiment_name = experiment_name
 
     def update(self, **kwargs):
-        for k, v in kwargs.items():
+        for k, val in kwargs.items():
+            if isinstance(val, tuple):
+                t, v = val
+            else:
+                t = ''
+                v = val
             if isinstance(v, torch.Tensor):
                 v = v.item()
             assert isinstance(v, (float, int))
             self.meters[k].update(v)
+            if self.writer is not None:
+                tag = t + '_' + self.experiment_name if t != '' else self.experiment_name
+                self.writer.add_scalars(k, {tag: v}, self.it)
+
+    def finish_step(self):
+        self.it += 1
 
     def __getattr__(self, attr):
         if attr in self.meters:
@@ -400,7 +416,7 @@ class MetricLogger(object):
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.6f} s / it)'.format(
+        tqdm.write('{} Total time: {} ({:.6f} s / it)'.format(
             header, total_time_str, total_time / len(iterable)))
 
 
