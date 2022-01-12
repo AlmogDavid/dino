@@ -60,7 +60,7 @@ class PatchMatcher:
         valid_boxes_cond = torch.logical_and(non_empty_boxes, same_image_cond)
 
         valid_boxes_idx = torch.nonzero(valid_boxes_cond.view(-1), as_tuple=True)[0]
-        valid_boxes_idx_a = valid_boxes_idx // B
+        valid_boxes_idx_a = torch.floor(valid_boxes_idx / B)
         valid_boxes_idx_b = valid_boxes_idx % B
         box_a_coord_norm = box_a_coord_norm[valid_boxes_cond]
         box_b_coord_norm = box_b_coord_norm[valid_boxes_cond]

@@ -626,60 +626,54 @@ class MultiCropWrapper(nn.Module):
         backbone.fc, backbone.head = nn.Identity(), nn.Identity()
         self.backbone = backbone
         self.head = head
-        self.is_swin_module = isinstance(backbone, SwinTransformer)
         self.local_res = local_res
         self.global_res = global_res
 
-    def forward(self, x,                 crop_flips: torch.Tensor,
+    def forward(self,
+                x : Union[List[torch.Tensor], torch.Tensor],
+                crop_flips: torch.Tensor,
                 local_matches: Optional[List[torch.Tensor]] = None,
                 global_matches: Optional[List[torch.Tensor]] = None,):
         # convert to list
         if not isinstance(x, list):
             x = [x]
-        unique_res, unique_res_count = torch.unique_consecutive(torch.tensor([inp.shape[-1] for inp in x]), return_counts=True)
-        idx_crops = torch.cumsum(unique_res_count, 0)
-        start_idx = 0
-        output = [] if self.is_swin_module else torch.empty(0).to(x[0].device)
-        for end_idx in idx_crops:
-            if self.is_swin_module:
-                _out = self.backbone(torch.cat(x[start_idx: end_idx]), f_type='segment') # 1 out per view
-                _out = _out[0]
-                output.append(_out)
-            else:
-                _out = self.backbone(torch.cat(x[start_idx: end_idx]))
-                # The output is a tuple with XCiT model. See:
-                # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
-                if isinstance(_out, tuple):
-                    _out = _out[0]
-                # accumulate outputs
-                output = torch.cat((output, _out))
-            start_idx = end_idx
-
-        if self.is_swin_module:
-            final_output = {}
-            for curr_res, curr_res_out in zip(unique_res, output):
-                curr_res = curr_res.item()
-                matches = global_matches if curr_res == self.global_res else local_matches
-                res_flips = (crop_flips[:, :2] if curr_res == self.global_res else crop_flips[:, 2:]).reshape(-1)
-                curr_res_out = handle_flips(flips=res_flips, pred=curr_res_out)  # Flip the feature maps so it will match the bbox
-                assert matches is not None
-
-                final_output[curr_res] = []
-
-                for i, layer_out in enumerate(curr_res_out):
-                    head = self.head[f"{curr_res}_{i}"]
-                    batch_size, dim_size, num_patch = layer_out.shape[:3]
-                    layer_out = layer_out.permute([0, 2, 3, 1]) # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, DIM]
-                    layer_out = layer_out.reshape([ -1, dim_size]) # [B * NUM_PATCHES_ROW**2, DIM]
-                    # Select only the relevant matches
-                    relevant_pred_idx = matches[i][:, 0] * (num_patch**2) + matches[i][:, 1]
-                    layer_out = layer_out[relevant_pred_idx]
-
-                    layer_out = head(layer_out)  # Compute the output -> [MATCHES, OUT_DIM]
-                    final_output[curr_res].append(layer_out)
+        #unique_res, unique_res_count = torch.unique_consecutive(torch.tensor([inp.shape[-1] for inp in x]), return_counts=True)
+        values, unique_match = torch.unique(torch.tensor([inp.shape[-1] for inp in x]), sorted=False, return_inverse=True)
+        if values.shape[0] == 1:
+            unique_x = [torch.cat(x, dim=0)]
         else:
-            # Run the head forward on the concatenated features.
-            final_output = self.head(output)
+            unique_x = [torch.cat([x[x_i] for x_i in torch.nonzero(unique_match == i, as_tuple=True)[0]]) for i in range(values.shape[0])]
+        # idx_crops = torch.cumsum(unique_res_count, 0)
+        # start_idx = 0
+        output = []
+        unique_res = []
+        for curr_x in unique_x:
+            _out = self.backbone(curr_x, f_type='segment') # 1 out per view
+            _out = _out[0]
+            output.append(_out)
+            unique_res.append(curr_x.size(-1))
+
+        final_output = {}
+        for curr_res, curr_res_out in zip(unique_res, output):
+            matches = global_matches if curr_res == self.global_res else local_matches
+            res_flips = (crop_flips[:, :2] if curr_res == self.global_res else crop_flips[:, 2:]).reshape(-1)
+            curr_res_out = handle_flips(flips=res_flips, pred=curr_res_out)  # Flip the feature maps so it will match the bbox
+            assert matches is not None
+
+            final_output[curr_res] = []
+
+            for i, layer_out in enumerate(curr_res_out):
+                head = self.head[f"{curr_res}_{i}"]
+                batch_size, dim_size, num_patch = layer_out.shape[:3]
+                layer_out = layer_out.permute([0, 2, 3, 1]) # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, DIM]
+                layer_out = layer_out.reshape([ -1, dim_size]) # [B * NUM_PATCHES_ROW**2, DIM]
+                # Select only the relevant matches
+                relevant_pred_idx = matches[i][:, 0] * (num_patch**2) + matches[i][:, 1]
+                layer_out = layer_out[relevant_pred_idx]
+
+                layer_out = head(layer_out)  # Compute the output -> [MATCHES, OUT_DIM]
+                final_output[curr_res].append(layer_out)
+
         return final_output
 
 

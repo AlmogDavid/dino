@@ -95,7 +95,7 @@ def get_args_parser():
         help optimization for larger ViT architectures. 0 for disabling.""")
     parser.add_argument('--batch_size_per_gpu', default=32, type=int,
                         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
-    parser.add_argument('--epochs', default=1000, type=int, help='Number of epochs of training.')
+    parser.add_argument('--epochs', default=50, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
@@ -320,6 +320,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for _, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(
             metric_logger.log_every(data_loader, 10, header)):
+
         # update weight decay and learning rate according to their schedule
         it = metric_logger.it
         for i, param_group in enumerate(optimizer.param_groups):
@@ -365,6 +366,28 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 matches_global_global = matches_global_global[
                     matches_global_global[:, 0] != matches_global_global[:, 2]]
 
+                # # START - DEBUG CODE
+                # if lvl_idx == 3:
+                #     global_images = torch.cat([im.unsqueeze(1) for im in images[:2]], dim=1).view(-1, 224, 224, 3)
+                #     num_patches = patches_map[args.global_crop_size][lvl_idx]
+                #     crop_size = 224
+                #     patch_size_pixels = crop_size // num_patches
+                #     crop_a = global_images[0].cpu().numpy().astype(np.float32) / 255
+                #     crop_b = global_images[1].cpu().numpy().astype(np.float32) / 255
+                #     relevant_matches = [c for c in matches_global_global.numpy() if c[0] == 0 and c[2] == 1]
+                #     for curr_match in relevant_matches:
+                #         patch_idx_a_yx = (curr_match[1] // num_patches, curr_match[1] % num_patches)
+                #         patch_idx_b_yx = (curr_match[3] // num_patches, curr_match[3] % num_patches)
+                #
+                #         crop_a[patch_idx_a_yx[0] * patch_size_pixels: (patch_idx_a_yx[0] + 1) * (patch_size_pixels), patch_idx_a_yx[1] * patch_size_pixels: (patch_idx_a_yx[1] + 1)* patch_size_pixels, :] = (crop_a[patch_idx_a_yx[0] * patch_size_pixels: (patch_idx_a_yx[0] + 1) * (patch_size_pixels), patch_idx_a_yx[1] * patch_size_pixels: (patch_idx_a_yx[1] + 1)* patch_size_pixels, :] + (0, 0, 1)) / 2
+                #         crop_b[patch_idx_b_yx[0] * patch_size_pixels: (patch_idx_b_yx[0] + 1) * patch_size_pixels,
+                #         patch_idx_b_yx[1] * patch_size_pixels: (patch_idx_b_yx[1] + 1) * patch_size_pixels, :] = (crop_b[patch_idx_b_yx[0] * patch_size_pixels: (patch_idx_b_yx[0] + 1) * patch_size_pixels,
+                #         patch_idx_b_yx[1] * patch_size_pixels: (patch_idx_b_yx[1] + 1) * patch_size_pixels, :] + (0, 0, 1)) / 2
+                #         break
+                #     attached_crops = np.concatenate([crop_a, crop_b], axis=1)
+                #     loli =3
+                # # END - DEBUG CODE
+
                 # Take subset
                 for curr_matches, rel_matches in ((matches_local_global, relevant_matches_local_global),
                                                   (matches_global_global, relevant_matches_global_global)):
@@ -376,8 +399,18 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             student_relevant_matches_local = [r[:, :2] for r in relevant_matches_local_global]
             student_relevant_matches_global = [r[:, :2] for r in relevant_matches_global_global]
 
-            teacher_output = teacher(images[:2], crops_flipped, global_matches=teacher_relevant_matches_global)  # only the 2 global views pass through the teacher
-            student_output = student(images, crops_flipped, local_matches=student_relevant_matches_local, global_matches=student_relevant_matches_global)
+            # Make the order of the images the same as the bbox
+            student_images = []
+            teacher_images = []
+            for curr_image_id in range(args.batch_size_per_gpu):
+                for curr_crop_index in range(len(images)):
+                    curr_image = images[curr_crop_index][curr_image_id].unsqueeze(0)
+                    student_images.append(curr_image)
+                    if curr_crop_index < 2: # only global
+                        teacher_images.append(curr_image)
+
+            teacher_output = teacher(teacher_images, crops_flipped, global_matches=teacher_relevant_matches_global)  # only the 2 global views pass through the teacher
+            student_output = student(student_images, crops_flipped, local_matches=student_relevant_matches_local, global_matches=student_relevant_matches_global)
 
             global_match_student_pred = student_output[args.global_crop_size]
             local_match_student_pred = student_output[args.local_crop_size]
