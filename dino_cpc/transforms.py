@@ -156,7 +156,7 @@ class RandomCropFlip(torch.nn.Module):
         self.flip_prob = flip_prob
 
     def forward(self, img):
-        """5
+        """
         Args:
             img (PIL Image or Tensor): Image to be cropped.
 
