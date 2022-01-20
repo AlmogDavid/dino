@@ -532,7 +532,7 @@ class SwinTransformer(nn.Module):
             layer_name = f'norm{i_layer}'
             self.add_module(layer_name, layer)
 
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.head = nn.Linear(self.num_features_last, num_classes) if num_classes > 0 else nn.Identity()
 
         self.apply(self._init_weights)
@@ -598,8 +598,7 @@ class SwinTransformer(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 f_type='segment'):
-        assert f_type == 'segment' # For this project only use segment option
-        if f_type in ['segment', 'extract_no_pool', 'extract_and_pool']:
+        if f_type in ['segment' , 'pool_features', 'flat_features']:
             # convert to list
             if not isinstance(x, list):
                 x = [x]
@@ -620,25 +619,18 @@ class SwinTransformer(nn.Module):
                 else:
                     output.append(_out)
                 start_idx = end_idx
-            if f_type == 'extract_no_pool':
-                return [o[-1] for o in output]
-            elif f_type == 'segment':
+            if f_type == 'segment':
                 return output
-            else: # extract_and_pool
+            else: # pool_features or flat_features
                 x = [view[-1].transpose(-1, -2) for view in output]
-
-        if f_type == 'head':
-            x = self.head(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
+        if f_type in ['pool_features']:
+            x = torch.cat([self.avgpool(res_view) for res_view in x])  # B C 1 1
+            x = torch.flatten(x, 1) # B C
             return x
-        if f_type in ['pool_head', 'extract_and_pool']:
-            x = torch.cat([self.avgpool(view) for view in x])  # B C 1
-            x = torch.flatten(x, 1)
-            # Run the head forward on the concatenated features.
-            x_out = self.head(x)
-            if f_type == 'pool_head':
-                return x, x_out
-            else:
-                return x_out
+        else: # flat_features
+            assert len(x) == 1
+            x = torch.flatten(x[0], 1)
+            return x
         raise ValueError
 
     def flops(self):

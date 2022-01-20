@@ -22,7 +22,8 @@ import torch.backends.cudnn as cudnn
 from torchvision import datasets
 from torchvision import transforms as pth_transforms
 from torchvision import models as torchvision_models
-
+from torchvision.transforms import InterpolationMode
+import models.swin_transformer as swins
 import utils
 from models import vision_transformer as vits
 
@@ -30,7 +31,7 @@ from models import vision_transformer as vits
 def extract_feature_pipeline(args):
     # ============ preparing data ... ============
     transform = pth_transforms.Compose([
-        pth_transforms.Resize(256, interpolation=3),
+        pth_transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
         pth_transforms.CenterCrop(224),
         pth_transforms.ToTensor(),
         pth_transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
@@ -56,17 +57,10 @@ def extract_feature_pipeline(args):
     print(f"Data loaded with {len(dataset_train)} train and {len(dataset_val)} val imgs.")
 
     # ============ building network ... ============
-    if "vit" in args.arch:
-        model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0)
-        print(f"Model {args.arch} {args.patch_size}x{args.patch_size} built.")
-    elif "xcit" in args.arch:
-        model = torch.hub.load('facebookresearch/xcit:main', args.arch, num_classes=0)
-    elif args.arch in torchvision_models.__dict__.keys():
-        model = torchvision_models.__dict__[args.arch](num_classes=0)
-        model.fc = nn.Identity()
+    if args.arch in swins.__dict__.keys():
+        model = swins.__dict__[args.arch](patch_size=args.patch_size)
     else:
-        print(f"Architecture {args.arch} non supported")
-        sys.exit(1)
+        raise RuntimeError(f"Invalid model: '{args.arch}' (supported: {list(swins.__dict__.keys())}")
     model.cuda()
     utils.load_pretrained_weights(model, args.pretrained_weights, args.checkpoint_key, args.arch, args.patch_size)
     model.eval()
@@ -84,11 +78,14 @@ def extract_feature_pipeline(args):
     train_labels = torch.tensor([s[-1] for s in dataset_train.samples]).long()
     test_labels = torch.tensor([s[-1] for s in dataset_val.samples]).long()
     # save features and labels
-    if args.dump_features and dist.get_rank() == 0:
-        torch.save(train_features.cpu(), os.path.join(args.dump_features, "trainfeat.pth"))
-        torch.save(test_features.cpu(), os.path.join(args.dump_features, "testfeat.pth"))
-        torch.save(train_labels.cpu(), os.path.join(args.dump_features, "trainlabels.pth"))
-        torch.save(test_labels.cpu(), os.path.join(args.dump_features, "testlabels.pth"))
+    if dist.get_rank() == 0:
+        out_dir = os.path.join(os.path.dirname(args.pretrained_weights), "KNN_features")
+        print(f"Saving features to: {out_dir}")
+        os.makedirs(out_dir, exist_ok=True)
+        torch.save(train_features.cpu(), os.path.join(out_dir, "trainfeat.pth"))
+        torch.save(test_features.cpu(), os.path.join(out_dir, "testfeat.pth"))
+        torch.save(train_labels.cpu(), os.path.join(out_dir, "trainlabels.pth"))
+        torch.save(test_labels.cpu(), os.path.join(out_dir, "testlabels.pth"))
     return train_features, test_features, train_labels, test_labels
 
 
@@ -102,7 +99,7 @@ def extract_features(model, data_loader, use_cuda=True, multiscale=False):
         if multiscale:
             feats = utils.multi_scale(samples, model)
         else:
-            feats = model(samples).clone()
+            feats = model(samples, f_type="pool_features").clone()
 
         # init storage feature matrix
         if dist.get_rank() == 0 and features is None:
@@ -136,6 +133,7 @@ def extract_features(model, data_loader, use_cuda=True, multiscale=False):
                 features.index_copy_(0, index_all, torch.cat(output_l))
             else:
                 features.index_copy_(0, index_all.cpu(), torch.cat(output_l).cpu())
+
     return features
 
 
@@ -143,7 +141,7 @@ def extract_features(model, data_loader, use_cuda=True, multiscale=False):
 def knn_classifier(train_features, train_labels, test_features, test_labels, k, T, num_classes=1000):
     top1, top5, total = 0.0, 0.0, 0
     train_features = train_features.t()
-    num_test_images, num_chunks = test_labels.shape[0], 100
+    num_test_images, num_chunks = test_labels.shape[0], 150
     imgs_per_chunk = num_test_images // num_chunks
     retrieval_one_hot = torch.zeros(k, num_classes).to(train_features.device)
     for idx in range(0, num_test_images, imgs_per_chunk):
@@ -195,22 +193,20 @@ if __name__ == '__main__':
         help='Number of NN to use. 20 is usually working the best.')
     parser.add_argument('--temperature', default=0.07, type=float,
         help='Temperature used in the voting coefficient')
-    parser.add_argument('--pretrained_weights', default='', type=str, help="Path to pretrained weights to evaluate.")
+    parser.add_argument('--pretrained_weights', required=True, type=str, help="Path to pretrained weights to evaluate.")
     parser.add_argument('--use_cuda', default=True, type=utils.bool_flag,
         help="Should we store the features on GPU? We recommend setting this to False if you encounter OOM")
-    parser.add_argument('--arch', default='vit_small', type=str, help='Architecture')
-    parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
+    parser.add_argument('--arch', required=True, type=str, help='Architecture')
+    parser.add_argument('--patch_size', default=4, type=int, help='Patch resolution of the model.')
     parser.add_argument("--checkpoint_key", default="teacher", type=str,
         help='Key to use in the checkpoint (example: "teacher")')
-    parser.add_argument('--dump_features', default=None,
-        help='Path where to save computed features, empty for no saving')
     parser.add_argument('--load_features', default=None, help="""If the features have
         already been computed, where to find them.""")
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
-    parser.add_argument('--data_path', default='/path/to/imagenet/', type=str)
+    parser.add_argument('--data_path', required=True, type=str)
     args = parser.parse_args()
 
     utils.init_distributed_mode(args)

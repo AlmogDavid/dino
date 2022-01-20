@@ -152,7 +152,7 @@ def train_dino(args):
         student.head = None  # Multi cropper makes it identity so no need to assign it
         teacher.head = None
     else:
-        raise RuntimeError(f"Unknow architecture: {args.arch}")
+        raise RuntimeError(f"Unknown architecture: {args.arch}")
 
     # multi-crop wrapper handles forward with inputs of different resolutions
     student_head = torch.nn.ModuleDict()
