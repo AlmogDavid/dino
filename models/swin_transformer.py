@@ -546,6 +546,22 @@ class SwinTransformer(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
+    def get_intermediate_feat(self, x, n=1):
+        features = self.forward(x, f_type="segment")
+        assert len(features) == 1, "only one resolution is supported"
+
+        # First layer is 4x4 patch size, second is 8x8, third is 16x16 and the last one is 32x32
+        features = features[0]
+        # We ignore the first level
+        conc_features = []
+        conc_features.append(features[1]) # Already 8x8
+        conc_features.append(torch.nn.functional.interpolate(features[2], scale_factor=2)) # Up sample to 8x8 from 16x16
+        conc_features.append(torch.nn.functional.interpolate(features[3], scale_factor=4)) # Up sample for 8x8 from 32x32
+
+        conc_features = torch.cat(conc_features, dim=1)
+
+        return conc_features
+
     @torch.jit.ignore
     def no_weight_decay(self):
         return {'absolute_pos_embed'}
