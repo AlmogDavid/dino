@@ -30,6 +30,7 @@ from typing import List, Union, Dict, Optional
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
 from torch.utils.tensorboard import SummaryWriter
@@ -43,6 +44,7 @@ class GaussianBlur(object):
     """
     Apply Gaussian Blur to the PIL image.
     """
+
     def __init__(self, p=0.5, radius_min=0.1, radius_max=2.):
         self.prob = p
         self.radius_min = radius_min
@@ -64,6 +66,7 @@ class Solarization(object):
     """
     Apply Solarization to the PIL image.
     """
+
     def __init__(self, p):
         self.p = p
 
@@ -425,6 +428,7 @@ def get_sha():
 
     def _run(command):
         return subprocess.check_output(command, cwd=cwd).decode('ascii').strip()
+
     sha = 'N/A'
     diff = "clean"
     branch = 'N/A'
@@ -574,6 +578,7 @@ class LARS(torch.optim.Optimizer):
     """
     Almost copy-paste from https://github.com/facebookresearch/barlowtwins/blob/main/main.py
     """
+
     def __init__(self, params, lr=0, weight_decay=0, momentum=0.9, eta=0.001,
                  weight_decay_filter=None, lars_adaptation_filter=None):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
@@ -620,6 +625,7 @@ class MultiCropWrapper(nn.Module):
     concatenate all the output features and run the head forward on these
     concatenated features.
     """
+
     def __init__(self, backbone, head: Union["DINOHead", Dict[int, "DINOHead"]], global_res: int, local_res: int):
         super(MultiCropWrapper, self).__init__()
         # disable layers dedicated to ImageNet labels classification
@@ -630,45 +636,62 @@ class MultiCropWrapper(nn.Module):
         self.global_res = global_res
 
     def forward(self,
-                x : Union[List[torch.Tensor], torch.Tensor],
+                x: Union[List[torch.Tensor], torch.Tensor],
                 crop_flips: torch.Tensor,
                 local_matches: Optional[List[torch.Tensor]] = None,
-                global_matches: Optional[List[torch.Tensor]] = None,):
+                global_matches: Optional[List[torch.Tensor]] = None,
+                multi_lvl_match: bool = False):
         # convert to list
         if not isinstance(x, list):
             x = [x]
-        #unique_res, unique_res_count = torch.unique_consecutive(torch.tensor([inp.shape[-1] for inp in x]), return_counts=True)
-        values, unique_match = torch.unique(torch.tensor([inp.shape[-1] for inp in x]), sorted=False, return_inverse=True)
+        # unique_res, unique_res_count = torch.unique_consecutive(torch.tensor([inp.shape[-1] for inp in x]), return_counts=True)
+        values, unique_match = torch.unique(torch.tensor([inp.shape[-1] for inp in x]), sorted=False,
+                                            return_inverse=True)
         if values.shape[0] == 1:
             unique_x = [torch.cat(x, dim=0)]
         else:
-            unique_x = [torch.cat([x[x_i] for x_i in torch.nonzero(unique_match == i, as_tuple=True)[0]]) for i in range(values.shape[0])]
+            unique_x = [torch.cat([x[x_i] for x_i in torch.nonzero(unique_match == i, as_tuple=True)[0]]) for i in
+                        range(values.shape[0])]
         # idx_crops = torch.cumsum(unique_res_count, 0)
         # start_idx = 0
         output = []
         unique_res = []
         for curr_x in unique_x:
-            _out = self.backbone(curr_x, f_type='segment') # 1 out per view
-            _out = _out[0]
+            _out = self.backbone(curr_x, f_type='segment')  # 1 out per view
+            _out = list(_out[0])
             output.append(_out)
             unique_res.append(curr_x.size(-1))
 
+        num_levels = len(output[0])
+
         final_output = {}
+
+        if multi_lvl_match:
+            new_output = []
+            for curr_out in output:
+                pooled_outputs = []
+                for co in curr_out[:-1]:
+                    co = F.avg_pool2d(torch.clone(co), 2)
+                    pooled_outputs.append(co)
+                new_output.append(list(curr_out) + pooled_outputs)
+            output = new_output
+
         for curr_res, curr_res_out in zip(unique_res, output):
             matches = global_matches if curr_res == self.global_res else local_matches
             res_flips = (crop_flips[:, :2] if curr_res == self.global_res else crop_flips[:, 2:]).reshape(-1)
-            curr_res_out = handle_flips(flips=res_flips, pred=curr_res_out)  # Flip the feature maps so it will match the bbox
+            curr_res_out = handle_flips(flips=res_flips,
+                                        pred=curr_res_out)  # Flip the feature maps so it will match the bbox
             assert matches is not None
 
             final_output[curr_res] = []
 
             for i, layer_out in enumerate(curr_res_out):
-                head = self.head[f"{curr_res}_{i}"]
+                head = self.head[f"{curr_res}_{i % num_levels}"]
                 batch_size, dim_size, num_patch = layer_out.shape[:3]
-                layer_out = layer_out.permute([0, 2, 3, 1]) # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, DIM]
-                layer_out = layer_out.reshape([ -1, dim_size]) # [B * NUM_PATCHES_ROW**2, DIM]
+                layer_out = layer_out.permute([0, 2, 3, 1])  # [B, NUM_PATCHES_ROW, NUM_PATCHES_ROW, DIM]
+                layer_out = layer_out.reshape([-1, dim_size])  # [B * NUM_PATCHES_ROW**2, DIM]
                 # Select only the relevant matches
-                relevant_pred_idx = matches[i][:, 0] * (num_patch**2) + matches[i][:, 1]
+                relevant_pred_idx = matches[i][:, 0] * (num_patch ** 2) + matches[i][:, 1]
                 layer_out = layer_out[relevant_pred_idx]
 
                 layer_out = head(layer_out)  # Compute the output -> [MATCHES, OUT_DIM]
@@ -703,6 +726,7 @@ class PCA():
     """
     Class to  compute and apply PCA.
     """
+
     def __init__(self, dim=256, whit=0.5):
         self.dim = dim
         self.whit = whit
@@ -729,7 +753,7 @@ class PCA():
         print("keeping %.2f %% of the energy" % (d.sum() / totenergy * 100.0))
 
         # for the whitening
-        d = np.diag(1. / d**self.whit)
+        d = np.diag(1. / d ** self.whit)
 
         # principal components
         self.dvt = np.dot(d, v.T)
@@ -804,7 +828,7 @@ def compute_map(ranks, gnd, kappas=[]):
     """
 
     map = 0.
-    nq = len(gnd) # number of queries
+    nq = len(gnd)  # number of queries
     aps = np.zeros(nq)
     pr = np.zeros(len(kappas))
     prs = np.zeros((nq, len(kappas)))
@@ -826,8 +850,8 @@ def compute_map(ranks, gnd, kappas=[]):
             qgndj = np.empty(0)
 
         # sorted positions of positive and junk images (0 based)
-        pos  = np.arange(ranks.shape[0])[np.in1d(ranks[:,i], qgnd)]
-        junk = np.arange(ranks.shape[0])[np.in1d(ranks[:,i], qgndj)]
+        pos = np.arange(ranks.shape[0])[np.in1d(ranks[:, i], qgnd)]
+        junk = np.arange(ranks.shape[0])[np.in1d(ranks[:, i], qgndj)]
 
         k = 0;
         ij = 0;
@@ -848,9 +872,9 @@ def compute_map(ranks, gnd, kappas=[]):
         aps[i] = ap
 
         # compute precision @ k
-        pos += 1 # get it to 1-based
+        pos += 1  # get it to 1-based
         for j in np.arange(len(kappas)):
-            kq = min(max(pos), kappas[j]); 
+            kq = min(max(pos), kappas[j]);
             prs[i, j] = (pos <= kq).sum() / kq
         pr = pr + prs[i, :]
 
@@ -862,7 +886,7 @@ def compute_map(ranks, gnd, kappas=[]):
 
 def multi_scale(samples, model):
     v = None
-    for s in [1, 1/2**(1/2), 1/2]:  # we use 3 different scales
+    for s in [1, 1 / 2 ** (1 / 2), 1 / 2]:  # we use 3 different scales
         if s == 1:
             inp = samples.clone()
         else:

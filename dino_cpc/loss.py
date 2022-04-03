@@ -107,15 +107,19 @@ class DINOLossCPCSingle(nn.Module):
 
 class DINOLossCPC(nn.Module):
 
-    def __init__(self, args: argparse.Namespace, num_features: int):
+    def __init__(self, args: argparse.Namespace, num_features: List[int]):
         super().__init__()
+        all_out_dim = list(args.out_dim)
+        if args.multi_level_matching:
+            all_out_dim += all_out_dim[:-1]
+            num_features += num_features[:-1]
         self.dino_loss = torch.nn.ModuleList(DINOLossCPCSingle(
             out_dim,
             args.warmup_teacher_temp,
             args.teacher_temp,
             args.warmup_teacher_temp_epochs,
             args.epochs,
-        ).cuda() for out_dim in args.out_dim)
+        ).cuda() for out_dim in all_out_dim)
         self.global_dino_loss = None
         if args.add_global_dino_loss:
             self.global_dino_loss = torch.nn.ModuleList(DINOLoss(

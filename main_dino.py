@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import copy
 import os
 import sys
 import datetime
@@ -115,6 +116,7 @@ def get_args_parser():
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
     parser.add_argument('--max_pairs', type=int, nargs=4, default=(512, 512, 512, 512),
                         help="Maximum number of pairs to take at each layer")
+    parser.add_argument('--multi_level_matching', type=utils.bool_flag, default=True, help="If True will use multi level patching")
 
     # Multi-crop parameters
     parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
@@ -191,6 +193,18 @@ def train_dino(args):
                                                            out_dim=args.out_dim[i],
                                                            use_bn=args.use_bn_in_head,
                                                            norm_last_layer=args.norm_last_layer)
+
+    if args.multi_level_matching:
+        # We "double" the network depth, we take all the layers twice except the last layer
+        args.max_pairs = tuple(list(args.max_pairs) + list(args.max_pairs[:-1]))
+        new_patch_map = {}
+        for res, patch_size in num_patches_map.items():
+            new_val = list(patch_size) + [p / 2 for p in patch_size[:-1]]  # We dont take the last one (small enough)
+            for p in new_val: assert p % 1 == 0
+            new_val = [int(p) for p in new_val]
+            new_patch_map[res] = new_val
+        num_patches_map = new_patch_map
+
     student = utils.MultiCropWrapper(student, student_head, args.global_crop_size, args.local_crop_size)
     teacher = utils.MultiCropWrapper(teacher, teacher_head, args.global_crop_size, args.local_crop_size)
 
@@ -294,9 +308,10 @@ def train_dino(args):
         data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
-        train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
-                                      data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-                                      epoch, fp16_scaler, args, num_patches_map, writer, it, args.exp_name)
+        with torch.autograd.set_detect_anomaly(True):
+            train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
+                                          data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
+                                          epoch, fp16_scaler, args, num_patches_map, writer, it, args.exp_name, args.multi_level_matching)
         it = train_stats['it']
         # ============ writing logs ... ============
         save_dict = {
@@ -327,7 +342,7 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
-                    fp16_scaler, args, patches_map, writer, it, experiment_name):
+                    fp16_scaler, args, patches_map, writer, it, experiment_name, multi_lvl_patch: bool):
     metric_logger = utils.MetricLogger(delimiter="  ", writer=writer, it=it, experiment_name=experiment_name)
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for _, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(
@@ -359,8 +374,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             relevant_matches_local_global = []
             relevant_matches_global_global = []
 
+            max_pairs = args.max_pairs
+
             # Now we check which local boxes matches the global boxes and compute the loss between them as well
-            for lvl_idx, num_pairs_to_grab in enumerate(args.max_pairs):
+            for lvl_idx, num_pairs_to_grab in enumerate(max_pairs):
                 matches_local_global = PatchMatcher.find_matches(crop_a=local_bbox,
                                                                  crop_size_a=args.local_crop_size,
                                                                  num_patches_a=patches_map[args.local_crop_size][
@@ -408,7 +425,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 for curr_matches, rel_matches in ((matches_local_global, relevant_matches_local_global),
                                                   (matches_global_global, relevant_matches_global_global)):
                     perm = torch.randperm(curr_matches.size(0))
-                    idx = perm[:args.max_pairs[lvl_idx]]
+                    idx = perm[:max_pairs[lvl_idx]]
                     rel_matches.append(curr_matches[idx])
 
             teacher_relevant_matches_global = [torch.cat([r1[:, 2:], r2[:, 2:]], dim=0) for r1, r2 in
@@ -427,9 +444,11 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                         teacher_images.append(curr_image)
 
             teacher_output, teacher_raw_output = teacher(teacher_images, crops_flipped,
-                                     global_matches=teacher_relevant_matches_global)  # only the 2 global views pass through the teacher
+                                     global_matches=teacher_relevant_matches_global,
+                                                         multi_lvl_match=multi_lvl_patch)  # only the 2 global views pass through the teacher
             student_output, student_raw_output = student(student_images, crops_flipped, local_matches=student_relevant_matches_local,
-                                     global_matches=student_relevant_matches_global)
+                                     global_matches=student_relevant_matches_global,
+                                                         multi_lvl_match=multi_lvl_patch)
 
             global_match_student_pred = student_output[args.global_crop_size]
             local_match_student_pred = student_output[args.local_crop_size]
