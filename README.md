@@ -416,3 +416,7 @@ Run swin small on phantom:
 ```
 python -m torch.distributed.launch --nproc_per_node=4 main_dino.py --arch swin_small --data_path /home/chaimb/ILSVRC/Data/CLS-LOC/ --output_dir /home/almogdavid/workspace/dino/trained_models/swin_small_dino_loss --exp_name training_swin_small --batch_size_per_gpu 85
 ```
+Run swin tiny on juliet
+```
+python3 -m torch.distributed.launch --nproc_per_node=8 main_dino.py --arch swin_tiny --data_path /mnt/mount/evgeniizh/ILSVRC/Data/CLS-LOC/ --output_dir /home/almogdavid/workspace/dino/trained_models/swin_small_dino_loss --exp_name training_swin_tiny --batch_size_per_gpu 48
+```

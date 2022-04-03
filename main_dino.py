@@ -343,7 +343,7 @@ def train_dino(args):
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
                     fp16_scaler, args, patches_map, writer, it, experiment_name, multi_lvl_patch: bool):
-    metric_logger = utils.MetricLogger(delimiter="  ", writer=writer, it=it, experiment_name=experiment_name)
+    metric_logger = utils.MetricLogger(delimiter="  ", writer=writer, it=it)
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for _, ((images, crops_bbox, crops_flipped, orig_img_size), _) in enumerate(
             metric_logger.log_every(data_loader, 10, header)):
