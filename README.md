@@ -414,5 +414,5 @@ If you find this repository useful, please consider giving a star :star: and cit
 ## Almog additions # todo: remove
 Run swin small on phantom: 
 ```
-python -m torch.distributed.launch --nproc_per_node=4 main_dino.py --arch swin_small --data_path /home/chaimb/ILSVRC/Data/CLS-LOC/ --output_dir /home/almogdavid/workspace/dino/trained_models/swin_small_dino_loss --exp_name training_swin_small --batch_size_per_gpu 80
+python -m torch.distributed.launch --nproc_per_node=4 main_dino.py --arch swin_small --data_path /home/chaimb/ILSVRC/Data/CLS-LOC/ --output_dir /home/almogdavid/workspace/dino/trained_models/swin_small_dino_loss --exp_name training_swin_small --batch_size_per_gpu 85
 ```
