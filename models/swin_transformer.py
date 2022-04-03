@@ -478,7 +478,7 @@ class SwinTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000, embed_dim=96, depths=(2, 2, 6, 2),
                  num_heads=(3, 6, 12, 24), window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0.,
                  attn_drop_rate=0., drop_path_rate=0.1, norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
-                 out_indices=(0, 1, 2, 3), use_checkpoint=False, **kwargs):
+                 out_indices=(0, 1, 2, 3), use_checkpoint=False, squeeze_predictions=False,  **kwargs):
         super().__init__()
 
         self.num_classes = num_classes
@@ -552,11 +552,11 @@ class SwinTransformer(nn.Module):
 
         # First layer is 4x4 patch size, second is 8x8, third is 16x16 and the last one is 32x32
         features = features[0]
-        # We ignore the first level
         conc_features = []
+        conc_features.append(torch.nn.functional.interpolate(features[0], scale_factor=.5, mode="bicubic")) # Down sample to 8x8 from 4x4
         conc_features.append(features[1]) # Already 8x8
-        conc_features.append(torch.nn.functional.interpolate(features[2], scale_factor=2)) # Up sample to 8x8 from 16x16
-        conc_features.append(torch.nn.functional.interpolate(features[3], scale_factor=4)) # Up sample for 8x8 from 32x32
+        conc_features.append(torch.nn.functional.interpolate(features[2], scale_factor=2, mode="bicubic")) # Up sample to 8x8 from 16x16
+        conc_features.append(torch.nn.functional.interpolate(features[3], scale_factor=4, mode="bicubic")) # Up sample for 8x8 from 32x32
 
         conc_features = torch.cat(conc_features, dim=1)
 

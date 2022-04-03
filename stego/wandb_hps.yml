@@ -1,0 +1,42 @@
+program: train_segmentation.py
+method: 'random'
+metric:
+    name: 'test/linear/Accuracy'
+    goal: 'maximize'
+parameters:
+  arch:
+    values: ['swin']
+  output_root:
+    values: ['/home/almogdavid/workspace/dino/stego/trained_models/swin_small']
+  model_type:
+    values: ['swin_small']
+  pretrained_weights:
+    values: ['/home/almogdavid/workspace/dino/stego/resources/swin_small/swin_small_final.pth']
+  patch_size:
+    values: [4]
+  use_recalibrator:
+    values: [True, False]
+  neg_inter_weight:
+    min: 0.5
+    max: 1.0
+  pos_inter_weight:
+    min: 0.0
+    max: 0.5
+  pos_intra_weight:
+    min: 0.5
+    max: 1.0
+  neg_inter_shift:
+    min: 0.5
+    max: 1.0
+  pos_inter_shift:
+    min: 0.0
+    max: 0.5
+  pos_intra_shift:
+    min: 0.0
+    max: 0.5
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

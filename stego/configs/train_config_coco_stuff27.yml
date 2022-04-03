@@ -1,12 +1,13 @@
-output_root: '../'
-pytorch_data_dir: '/datadrive/pytorch-data/'
-experiment_name: "exp1"
+output_root: None
+pytorch_data_dir: '/home/almogdavid/datasets'
+experiment_name: "coco_stuff_27"
 log_dir: "cleaning"
-azureml_logging: True
+azureml_logging: False
 submitting_to_aml: False
+use_wandb: False
 
 # Loader params
-num_workers: 24
+num_workers: 8
 max_steps: 5000
 
 
@@ -29,6 +30,7 @@ use_fit_model: False
 dino_feat_type: "feat"
 projection_type: "nonlinear"
 #projection_type: linear
+patch_size: 8
 dino_patch_size: 8
 granularity: 1
 continuous: True
@@ -52,20 +54,20 @@ correspondence_weight: 1.0
 
 
 # Potsdam vit small 1/31/22
-neg_inter_weight: 0.63
-pos_inter_weight: 0.25
-pos_intra_weight: 0.67
-neg_inter_shift: 0.46
-pos_inter_shift: 0.02
-pos_intra_shift: 0.08
-
-# Cocostuff27 vit small 1/31/22
 #neg_inter_weight: 0.63
 #pos_inter_weight: 0.25
 #pos_intra_weight: 0.67
-#neg_inter_shift: 0.66
+#neg_inter_shift: 0.46
 #pos_inter_shift: 0.02
 #pos_intra_shift: 0.08
+
+# Cocostuff27 vit small 1/31/22
+neg_inter_weight: 0.63
+pos_inter_weight: 0.25
+pos_intra_weight: 0.67
+neg_inter_shift: 0.66
+pos_inter_shift: 0.02
+pos_intra_shift: 0.08
 
 
 ## Cocostuff27 10/3 vit_base

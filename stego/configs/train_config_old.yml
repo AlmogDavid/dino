@@ -1,20 +1,20 @@
-output_root: '../'
-pytorch_data_dir: '/datadrive/pytorch-data/'
+output_root: '/home/chaimb/almog_workspace/models/stego_coco_swin_small'
+pytorch_data_dir: '/home/almogdavid/datasets'
 experiment_name: "exp1"
-log_dir: "cleaning"
-azureml_logging: True
+log_dir: "ablation"
+azureml_logging: False
 submitting_to_aml: False
 
 # Loader params
 num_workers: 24
-max_steps: 5000
+max_steps: 10000
 
 
 num_neighbors: 7
 
 batch_size: 16
 dataset_name: "cocostuff27"
-crop_type: ~
+crop_type:
 crop_ratio: .5
 res: 224
 loader_crop_type: "center"
@@ -23,52 +23,39 @@ loader_crop_type: "center"
 extra_clusters: 0
 use_true_labels: False
 use_recalibrator: False
+#model_type: "swin_small"
+#arch: "swin"
 model_type: "vit_small"
 arch: "dino"
 use_fit_model: False
 dino_feat_type: "feat"
 projection_type: "nonlinear"
 #projection_type: linear
+patch_size: 8
 dino_patch_size: 8
 granularity: 1
 continuous: True
 dim: 70
+#dim: 384
 dropout: True
-zero_clamp: True
+
 
 lr: 5e-4
-pretrained_weights: ~
-use_salience: False
-stabalize: False
+#pretrained_weights: "/home/chaimb/almog_workspace/dino/trained_model/initial_final.pth"
+pretrained_weights:
+use_salience: True
+stabalize: True
 stop_at_zero: True
 
 # Feature Contrastive params
 pointwise: True
 feature_samples: 11
 neg_samples: 5
-aug_alignment_weight: 0.0
+aug_alignment_weight: 1.0
 
 correspondence_weight: 1.0
 
-
-# Potsdam vit small 1/31/22
-neg_inter_weight: 0.63
-pos_inter_weight: 0.25
-pos_intra_weight: 0.67
-neg_inter_shift: 0.46
-pos_inter_shift: 0.02
-pos_intra_shift: 0.08
-
-# Cocostuff27 vit small 1/31/22
-#neg_inter_weight: 0.63
-#pos_inter_weight: 0.25
-#pos_intra_weight: 0.67
-#neg_inter_shift: 0.66
-#pos_inter_shift: 0.02
-#pos_intra_shift: 0.08
-
-
-## Cocostuff27 10/3 vit_base
+## Cocostuff27 10/3
 
 #neg_inter_weight: 0.1538476246415498
 #pos_inter_weight: 1
@@ -77,42 +64,33 @@ pos_intra_shift: 0.08
 #neg_inter_shift: 1
 #pos_inter_shift: 0.2
 #pos_intra_shift: 0.12
+#
 
 
-## Cocostuff27 10/3 vit_small
+
+## Cocostuff27
 #neg_inter_weight: .63
 #pos_inter_weight: .25
 #pos_intra_weight: .67
 #
-#neg_inter_shift: .16
+#neg_inter_shift: .66
 #pos_inter_shift: .02
 #pos_intra_shift: .08
-
-
-
-## Cocostuff27 10/3 moco
-#neg_inter_weight: .63
-#pos_inter_weight: .25
-#pos_intra_weight: .67
-#
-#neg_inter_shift: .26
-#pos_inter_shift: .36
-#pos_intra_shift: .32
 
 #pos_inter_shift: .12
 #pos_intra_shift: .18
 
 ## Cocostuff27
-#neg_inter_weight: .72
-#pos_inter_weight: .80
-#pos_intra_weight: .29
-#
-#neg_inter_shift: .86
-#pos_inter_shift: .04
-#pos_intra_shift: .34
+neg_inter_weight: .72
+pos_inter_weight: .80
+pos_intra_weight: .29
+
+neg_inter_shift: .86
+pos_inter_shift: .04
+pos_intra_shift: .34
 
 # Cityscapes 10/3
-
+#
 #neg_inter_weight: 0.9058762625226623
 #pos_inter_weight: 0.577453483136995
 #pos_intra_weight: 1
@@ -132,11 +110,11 @@ pos_intra_shift: 0.08
 #pos_intra_shift: .25
 
 
-rec_weight: 0.0
-repulsion_weight: 0.0
+rec_weight: 1.0
+repulsion_weight: 1.0
 
 # CRF Params
-crf_weight: 0.0
+crf_weight: 1.0
 alpha: .5
 beta: .15
 gamma: .05

@@ -674,7 +674,7 @@ class MultiCropWrapper(nn.Module):
                 layer_out = head(layer_out)  # Compute the output -> [MATCHES, OUT_DIM]
                 final_output[curr_res].append(layer_out)
 
-        return final_output
+        return final_output, output
 
 
 def get_params_groups(model):

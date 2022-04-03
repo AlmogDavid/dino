@@ -1,6 +1,8 @@
 import io
+from typing import Dict
 
 import PIL.Image
+import wandb
 from torch.utils.tensorboard.summary import hparams
 from torchvision.transforms import ToTensor
 
@@ -510,120 +512,143 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         return net_optim, linear_probe_optim, cluster_probe_optim
 
 
-@hydra.main(config_path="configs", config_name="train_config.yml")
+def cfg2dict(cfg: DictConfig) -> Dict:
+    """
+    Recursively convert OmegaConf to vanilla dict
+    """
+    cfg_dict = {}
+    for k, v in cfg.items():
+        if type(v) == DictConfig:
+            cfg_dict[k] = cfg2dict(v)
+        else:
+            cfg_dict[k] = v
+    return cfg_dict
+
+
+@hydra.main(config_path="configs", config_name="train_config_coco_stuff27.yml")
 def my_app(cfg: DictConfig) -> None:
+    if cfg.use_wandb:
+        wandb.init(project="SSL_segmentation", sync_tensorboard=True)
+        wandb.config.update(cfg2dict(cfg))
     OmegaConf.set_struct(cfg, False)
-    print(OmegaConf.to_yaml(cfg))
-    pytorch_data_dir = cfg.pytorch_data_dir
-    data_dir = join(cfg.output_root, "data")
-    log_dir = join(cfg.output_root, "logs")
-    checkpoint_dir = join(cfg.output_root, "checkpoints")
+    got_exception = False
+    try:
+        print(OmegaConf.to_yaml(cfg))
+        pytorch_data_dir = cfg.pytorch_data_dir
+        data_dir = join(cfg.output_root, "data")
+        log_dir = join(cfg.output_root, "logs")
+        checkpoint_dir = join(cfg.output_root, "checkpoints")
 
-    prefix = "{}/{}_{}".format(cfg.log_dir, cfg.dataset_name, cfg.experiment_name)
-    name = '{}_date_{}'.format(prefix, datetime.now().strftime('%b%d_%H-%M-%S'))
-    cfg.full_name = prefix
+        prefix = "{}/{}_{}".format(cfg.log_dir, cfg.dataset_name, cfg.experiment_name)
+        name = '{}_date_{}'.format(prefix, datetime.now().strftime('%b%d_%H-%M-%S'))
+        cfg.full_name = prefix
 
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
-    seed_everything(seed=0)
+        seed_everything(seed=0)
 
-    print(data_dir)
-    print(cfg.output_root)
+        print(data_dir)
+        print(cfg.output_root)
 
-    geometric_transforms = T.Compose([
-        T.RandomHorizontalFlip(),
-        T.RandomResizedCrop(size=cfg.res, scale=(0.8, 1.0))
-    ])
-    photometric_transforms = T.Compose([
-        T.ColorJitter(brightness=.3, contrast=.3, saturation=.3, hue=.1),
-        T.RandomGrayscale(.2),
-        T.RandomApply([T.GaussianBlur((5, 5))])
-    ])
+        geometric_transforms = T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomResizedCrop(size=cfg.res, scale=(0.8, 1.0))
+        ])
+        photometric_transforms = T.Compose([
+            T.ColorJitter(brightness=.3, contrast=.3, saturation=.3, hue=.1),
+            T.RandomGrayscale(.2),
+            T.RandomApply([T.GaussianBlur((5, 5))])
+        ])
 
-    sys.stdout.flush()
+        sys.stdout.flush()
 
-    train_dataset = ContrastiveSegDataset(
-        pytorch_data_dir=pytorch_data_dir,
-        dataset_name=cfg.dataset_name,
-        crop_type=cfg.crop_type,
-        image_set="train",
-        transform=get_transform(cfg.res, False, cfg.loader_crop_type),
-        target_transform=get_transform(cfg.res, True, cfg.loader_crop_type),
-        cfg=cfg,
-        aug_geometric_transform=geometric_transforms,
-        aug_photometric_transform=photometric_transforms,
-        num_neighbors=cfg.num_neighbors,
-        mask=True,
-        pos_images=True,
-        pos_labels=True
-    )
+        train_dataset = ContrastiveSegDataset(
+            pytorch_data_dir=pytorch_data_dir,
+            dataset_name=cfg.dataset_name,
+            crop_type=cfg.crop_type,
+            image_set="train",
+            transform=get_transform(cfg.res, False, cfg.loader_crop_type),
+            target_transform=get_transform(cfg.res, True, cfg.loader_crop_type),
+            cfg=cfg,
+            aug_geometric_transform=geometric_transforms,
+            aug_photometric_transform=photometric_transforms,
+            num_neighbors=cfg.num_neighbors,
+            mask=True,
+            pos_images=True,
+            pos_labels=True
+        )
 
-    if cfg.dataset_name == "voc":
-        val_loader_crop = None
-    else:
-        val_loader_crop = "center"
+        if cfg.dataset_name == "voc":
+            val_loader_crop = None
+        else:
+            val_loader_crop = "center"
 
-    val_dataset = ContrastiveSegDataset(
-        pytorch_data_dir=pytorch_data_dir,
-        dataset_name=cfg.dataset_name,
-        crop_type=None,
-        image_set="val",
-        transform=get_transform(320, False, val_loader_crop),
-        target_transform=get_transform(320, True, val_loader_crop),
-        mask=True,
-        cfg=cfg,
-    )
+        val_dataset = ContrastiveSegDataset(
+            pytorch_data_dir=pytorch_data_dir,
+            dataset_name=cfg.dataset_name,
+            crop_type=None,
+            image_set="val",
+            transform=get_transform(320, False, val_loader_crop),
+            target_transform=get_transform(320, True, val_loader_crop),
+            mask=True,
+            cfg=cfg,
+        )
 
-    val_dataset = MaterializedDataset(val_dataset)
-    train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
+        val_dataset = MaterializedDataset(val_dataset)
+        train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
 
-    if cfg.submitting_to_aml:
-        val_batch_size = 16
-    else:
-        val_batch_size = cfg.batch_size
+        if cfg.submitting_to_aml:
+            val_batch_size = 16
+        else:
+            val_batch_size = cfg.batch_size
 
-    val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
+        val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
 
-    model = LitUnsupervisedSegmenter(train_dataset.n_classes, cfg)
+        model = LitUnsupervisedSegmenter(train_dataset.n_classes, cfg)
 
-    tb_logger = TensorBoardLogger(
-        join(log_dir, name),
-        default_hp_metric=False
-    )
+        tb_logger = TensorBoardLogger(
+            join(log_dir, name),
+            default_hp_metric=False
+        )
 
-    if cfg.submitting_to_aml:
-        gpu_args = dict(gpus=1, val_check_interval=250)
+        if cfg.submitting_to_aml:
+            gpu_args = dict(gpus=1, val_check_interval=250)
 
-        if gpu_args["val_check_interval"] > len(train_loader):
-            gpu_args.pop("val_check_interval")
+            if gpu_args["val_check_interval"] > len(train_loader):
+                gpu_args.pop("val_check_interval")
 
-    else:
-        gpu_args = dict(gpus=-1, accelerator='ddp', val_check_interval=cfg.val_freq)
-        # gpu_args = dict(gpus=1, accelerator='ddp', val_check_interval=cfg.val_freq)
+        else:
+            gpu_args = dict(gpus=-1, accelerator='ddp', val_check_interval=cfg.val_freq)
+            # gpu_args = dict(gpus=1, accelerator='ddp', val_check_interval=cfg.val_freq)
 
-        if gpu_args["val_check_interval"] > len(train_loader) // 4:
-            gpu_args.pop("val_check_interval")
+            if gpu_args["val_check_interval"] > len(train_loader) // 4:
+                gpu_args.pop("val_check_interval")
 
-    trainer = Trainer(
-        log_every_n_steps=cfg.scalar_log_freq,
-        logger=tb_logger,
-        max_steps=cfg.max_steps,
-        callbacks=[
-            ModelCheckpoint(
-                dirpath=join(checkpoint_dir, name),
-                every_n_train_steps=400,
-                save_top_k=2,
-                monitor="test/cluster/mIoU",
-                mode="max",
-            )
-        ],
-        **gpu_args
-    )
-    trainer.fit(model, train_loader, val_loader)
-
+        trainer = Trainer(
+            log_every_n_steps=cfg.scalar_log_freq,
+            logger=tb_logger,
+            max_steps=cfg.max_steps,
+            callbacks=[
+                ModelCheckpoint(
+                    dirpath=join(checkpoint_dir, name),
+                    every_n_train_steps=400,
+                    save_top_k=2,
+                    monitor="test/cluster/mIoU",
+                    mode="max",
+                )
+            ],
+            **gpu_args
+        )
+        trainer.fit(model, train_loader, val_loader)
+    except Exception as e:
+        got_exception = True
+        raise
+    finally:
+        if cfg.use_wandb:
+            wandb.finish(1 if got_exception else 0)
 
 if __name__ == "__main__":
-    prep_args()
+    #prep_args()
     my_app()

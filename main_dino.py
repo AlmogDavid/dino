@@ -48,6 +48,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('DINO', add_help=False)
 
     parser.add_argument("--exp_name", required=True, help="The experiment name")
+    parser.add_argument("--use_wandb", default=False, type=utils.bool_flag, help="If True will log results to wandb")
 
     # Model parameters
     parser.add_argument('--arch', default='swin_small', type=str,
@@ -69,6 +70,8 @@ def get_args_parser():
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag,
                         help="Whether to use batch normalizations in projection head (Default: False)")
+    parser.add_argument("--add_global_dino_loss", default=False, type=utils.bool_flag,
+                        help="Whether to add a global dino loss for each level (SWIN only)")
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
@@ -135,6 +138,12 @@ def get_args_parser():
 
 def train_dino(args):
     utils.init_distributed_mode(args)
+
+    if args.use_wandb and utils.is_main_process():
+        import wandb
+        wandb.init(name=args.exp_name, project="DINO_SWIN_IMPROVMENTS", sync_tensorboard=True)
+        wandb.config.update(vars(args))
+
     utils.fix_random_seeds(args.seed)
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
@@ -151,6 +160,7 @@ def train_dino(args):
                                             img_size=args.global_crop_size)
         student.head = None  # Multi cropper makes it identity so no need to assign it
         teacher.head = None
+        num_features = student.num_features
     else:
         raise RuntimeError(f"Unknown architecture: {args.arch}")
 
@@ -206,7 +216,7 @@ def train_dino(args):
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
     # ============ preparing data ... ============
-    #assert args.global_crop_size // args.local_crop_size == args.global_crop_size / args.local_crop_size, "The global crop should be a multiplication of the local crop size so we can compare the patches"
+    # assert args.global_crop_size // args.local_crop_size == args.global_crop_size / args.local_crop_size, "The global crop should be a multiplication of the local crop size so we can compare the patches"
     maximal_patch_size = args.patch_size * (2 ** (student.module.backbone.num_layers - 1))
     transform = Compose([
         MinimalSizeResize(minimal_size=maximal_patch_size * 10,
@@ -230,7 +240,7 @@ def train_dino(args):
     print(f"Data loaded: there are {len(dataset)} images.")
 
     # ============ preparing loss ... ============
-    dino_loss = DINOLossCPC(args=args)
+    dino_loss = DINOLossCPC(args=args, num_features=num_features)
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -277,7 +287,6 @@ def train_dino(args):
 
     writer = SummaryWriter(log_dir=args.output_dir) if utils.is_main_process() else None
 
-
     start_time = time.time()
     print("Starting DINO training !")
     it = 0
@@ -311,6 +320,9 @@ def train_dino(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
+    if args.use_wandb:
+        wandb.finish()
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
@@ -351,17 +363,21 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             for lvl_idx, num_pairs_to_grab in enumerate(args.max_pairs):
                 matches_local_global = PatchMatcher.find_matches(crop_a=local_bbox,
                                                                  crop_size_a=args.local_crop_size,
-                                                                 num_patches_a=patches_map[args.local_crop_size][lvl_idx],
+                                                                 num_patches_a=patches_map[args.local_crop_size][
+                                                                     lvl_idx],
                                                                  crop_b=global_bbox,
                                                                  crop_size_b=args.global_crop_size,
-                                                                 num_patches_b=patches_map[args.global_crop_size][lvl_idx])
+                                                                 num_patches_b=patches_map[args.global_crop_size][
+                                                                     lvl_idx])
 
                 matches_global_global = PatchMatcher.find_matches(crop_a=global_bbox,
                                                                   crop_size_a=args.global_crop_size,
-                                                                  num_patches_a=patches_map[args.global_crop_size][lvl_idx],
+                                                                  num_patches_a=patches_map[args.global_crop_size][
+                                                                      lvl_idx],
                                                                   crop_b=global_bbox,
                                                                   crop_size_b=args.global_crop_size,
-                                                                  num_patches_b=patches_map[args.global_crop_size][lvl_idx])
+                                                                  num_patches_b=patches_map[args.global_crop_size][
+                                                                      lvl_idx])
                 # Remove all global matches which matches the same view, because its not interesting
                 matches_global_global = matches_global_global[
                     matches_global_global[:, 0] != matches_global_global[:, 2]]
@@ -395,7 +411,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     idx = perm[:args.max_pairs[lvl_idx]]
                     rel_matches.append(curr_matches[idx])
 
-            teacher_relevant_matches_global = [torch.cat([r1[:,2:], r2[:,2:]], dim=0) for r1,r2 in zip(relevant_matches_local_global, relevant_matches_global_global)]
+            teacher_relevant_matches_global = [torch.cat([r1[:, 2:], r2[:, 2:]], dim=0) for r1, r2 in
+                                               zip(relevant_matches_local_global, relevant_matches_global_global)]
             student_relevant_matches_local = [r[:, :2] for r in relevant_matches_local_global]
             student_relevant_matches_global = [r[:, :2] for r in relevant_matches_global_global]
 
@@ -406,23 +423,29 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 for curr_crop_index in range(len(images)):
                     curr_image = images[curr_crop_index][curr_image_id].unsqueeze(0)
                     student_images.append(curr_image)
-                    if curr_crop_index < 2: # only global
+                    if curr_crop_index < 2:  # only global
                         teacher_images.append(curr_image)
 
-            teacher_output = teacher(teacher_images, crops_flipped, global_matches=teacher_relevant_matches_global)  # only the 2 global views pass through the teacher
-            student_output = student(student_images, crops_flipped, local_matches=student_relevant_matches_local, global_matches=student_relevant_matches_global)
+            teacher_output, teacher_raw_output = teacher(teacher_images, crops_flipped,
+                                     global_matches=teacher_relevant_matches_global)  # only the 2 global views pass through the teacher
+            student_output, student_raw_output = student(student_images, crops_flipped, local_matches=student_relevant_matches_local,
+                                     global_matches=student_relevant_matches_global)
 
             global_match_student_pred = student_output[args.global_crop_size]
             local_match_student_pred = student_output[args.local_crop_size]
-            local_match_teacher_pred = [o[:local_match_student_pred[i].size(0), :] for i, o in enumerate(teacher_output[args.global_crop_size])]
-            global_match_teacher_pred = [o[local_match_student_pred[i].size(0):, :] for i, o in enumerate(teacher_output[args.global_crop_size])]
+            local_match_teacher_pred = [o[:local_match_student_pred[i].size(0), :] for i, o in
+                                        enumerate(teacher_output[args.global_crop_size])]
+            global_match_teacher_pred = [o[local_match_student_pred[i].size(0):, :] for i, o in
+                                         enumerate(teacher_output[args.global_crop_size])]
 
-            loss, sep_loss = dino_loss(global_match_student_pred,
-                             local_match_student_pred,
-                             local_match_teacher_pred,
-                             global_match_teacher_pred,
-                             epoch,
-                             args)
+            loss, sep_loss, global_loss = dino_loss(global_match_student_pred,
+                                                    local_match_student_pred,
+                                                    local_match_teacher_pred,
+                                                    global_match_teacher_pred,
+                                                    teacher_raw_output,
+                                                    student_raw_output,
+                                                    epoch,
+                                                    args)
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -458,6 +481,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
         metric_logger.update(**{f"loss_lvl_{i}": lvl_loss for i, lvl_loss in enumerate(sep_loss)})
+        if len(global_loss):
+            metric_logger.update(**{f"global_loss_lvl_{i}": lvl_loss for i, lvl_loss in enumerate(global_loss)})
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
 
@@ -477,12 +502,14 @@ def save_args(args: argparse.Namespace):
     with open(os.path.join(args.output_dir, "input_args.json"), "w") as out_file:
         json.dump(args_dict, out_file)
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
     dateTimeObj = datetime.datetime.now()
     timestampStr = dateTimeObj.strftime("%Y%m%d_%H%M%S")
-    args.output_dir = os.path.join(args.output_dir, f"{args.exp_name}_{timestampStr}") # This code breaks the ability to revive workers
+    args.output_dir = os.path.join(args.output_dir,
+                                   f"{args.exp_name}_{timestampStr}")  # This code breaks the ability to revive workers
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     save_args(args)
