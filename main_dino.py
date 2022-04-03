@@ -143,7 +143,7 @@ def train_dino(args):
 
     if args.use_wandb and utils.is_main_process():
         import wandb
-        wandb.init(name=args.exp_name, project="DINO_SWIN_IMPROVMENTS", sync_tensorboard=True)
+        wandb.init(name=args.exp_name, project="Dino_SWIN", sync_tensorboard=True)
         wandb.config.update(vars(args))
 
     utils.fix_random_seeds(args.seed)
