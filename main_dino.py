@@ -400,25 +400,26 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                     matches_global_global[:, 0] != matches_global_global[:, 2]]
 
                 # # START - DEBUG CODE
-                # if lvl_idx == 3:
-                #     global_images = torch.cat([im.unsqueeze(1) for im in images[:2]], dim=1).view(-1, 224, 224, 3)
-                #     num_patches = patches_map[args.global_crop_size][lvl_idx]
-                #     crop_size = 224
-                #     patch_size_pixels = crop_size // num_patches
-                #     crop_a = global_images[0].cpu().numpy().astype(np.float32) / 255
-                #     crop_b = global_images[1].cpu().numpy().astype(np.float32) / 255
-                #     relevant_matches = [c for c in matches_global_global.numpy() if c[0] == 0 and c[2] == 1]
-                #     for curr_match in relevant_matches:
-                #         patch_idx_a_yx = (curr_match[1] // num_patches, curr_match[1] % num_patches)
-                #         patch_idx_b_yx = (curr_match[3] // num_patches, curr_match[3] % num_patches)
-                #
-                #         crop_a[patch_idx_a_yx[0] * patch_size_pixels: (patch_idx_a_yx[0] + 1) * (patch_size_pixels), patch_idx_a_yx[1] * patch_size_pixels: (patch_idx_a_yx[1] + 1)* patch_size_pixels, :] = (crop_a[patch_idx_a_yx[0] * patch_size_pixels: (patch_idx_a_yx[0] + 1) * (patch_size_pixels), patch_idx_a_yx[1] * patch_size_pixels: (patch_idx_a_yx[1] + 1)* patch_size_pixels, :] + (0, 0, 1)) / 2
-                #         crop_b[patch_idx_b_yx[0] * patch_size_pixels: (patch_idx_b_yx[0] + 1) * patch_size_pixels,
-                #         patch_idx_b_yx[1] * patch_size_pixels: (patch_idx_b_yx[1] + 1) * patch_size_pixels, :] = (crop_b[patch_idx_b_yx[0] * patch_size_pixels: (patch_idx_b_yx[0] + 1) * patch_size_pixels,
-                #         patch_idx_b_yx[1] * patch_size_pixels: (patch_idx_b_yx[1] + 1) * patch_size_pixels, :] + (0, 0, 1)) / 2
-                #         break
-                #     attached_crops = np.concatenate([crop_a, crop_b], axis=1)
-                #     loli =3
+                if lvl_idx == 3:
+                    global_images = torch.cat([im.unsqueeze(1) for im in images[:2]], dim=1).view(-1, 3, 224, 224).transpose(1,3)
+                    num_patches = patches_map[args.global_crop_size][lvl_idx]
+                    crop_size = 224
+                    patch_size_pixels = crop_size // num_patches
+                    crop_a = global_images[0].cpu().numpy().astype(np.float32) / 255
+                    crop_b = global_images[1].cpu().numpy().astype(np.float32) / 255
+                    relevant_matches = [c for c in matches_global_global.numpy() if c[0] == 0 and c[2] == 1]
+                    for curr_match in relevant_matches:
+                        patch_idx_a_yx = (curr_match[1] // num_patches, curr_match[1] % num_patches)
+                        patch_idx_b_yx = (curr_match[3] // num_patches, curr_match[3] % num_patches)
+
+                        crop_a = crop_a[patch_idx_a_yx[0] * patch_size_pixels: (patch_idx_a_yx[0] + 1) * (patch_size_pixels),
+                                 patch_idx_a_yx[1] * patch_size_pixels: (patch_idx_a_yx[1] + 1)* patch_size_pixels, :]
+                        crop_b = crop_b[patch_idx_b_yx[0] * patch_size_pixels: (patch_idx_b_yx[0] + 1) * patch_size_pixels,
+                        patch_idx_b_yx[1] * patch_size_pixels: (patch_idx_b_yx[1] + 1) * patch_size_pixels, :]
+                        break
+                    attached_crops = np.concatenate([crop_a, crop_b], axis=1)
+                    attached_crops = (attached_crops - np.min(attached_crops)) / (np.max(attached_crops) - np.min(attached_crops))
+                    loli =3
                 # # END - DEBUG CODE
 
                 # Take subset

@@ -159,7 +159,7 @@ class SwinFeaturizer(nn.Module):
 
         msg = self.model.load_state_dict(state_dict, strict=False)
         print('Pretrained weights found at {} and loaded with msg: {}'.format(cfg.pretrained_weights, msg))
-        self.n_feats = 768 # todo: NEED TO CHANGE THIS VALUE
+        self.n_feats = 1440 # todo: NEED TO CHANGE THIS VALUE
         self.cluster1 = self.make_clusterer(self.n_feats)
         self.proj_type = cfg.projection_type
         if self.proj_type == "nonlinear":

@@ -4,6 +4,7 @@ experiment_name: "coco_stuff_27"
 log_dir: "cleaning"
 azureml_logging: False
 submitting_to_aml: False
+Pretrained weights found at: False
 use_wandb: False
 
 # Loader params
