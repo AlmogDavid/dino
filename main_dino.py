@@ -20,8 +20,8 @@ import time
 import math
 import json
 from pathlib import Path
-
 import numpy as np
+import cv2
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
@@ -97,7 +97,7 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=55, type=int,
+    parser.add_argument('--batch_size_per_gpu', default=4, type=int,
                         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=300, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
@@ -399,28 +399,93 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
                 matches_global_global = matches_global_global[
                     matches_global_global[:, 0] != matches_global_global[:, 2]]
 
-                # # START - DEBUG CODE
-                if lvl_idx == 3:
-                    global_images = torch.cat([im.unsqueeze(1) for im in images[:2]], dim=1).view(-1, 3, 224, 224).transpose(1,3)
-                    num_patches = patches_map[args.global_crop_size][lvl_idx]
-                    crop_size = 224
-                    patch_size_pixels = crop_size // num_patches
-                    crop_a = global_images[0].cpu().numpy().astype(np.float32) / 255
-                    crop_b = global_images[1].cpu().numpy().astype(np.float32) / 255
-                    relevant_matches = [c for c in matches_global_global.numpy() if c[0] == 0 and c[2] == 1]
-                    for curr_match in relevant_matches:
-                        patch_idx_a_yx = (curr_match[1] // num_patches, curr_match[1] % num_patches)
-                        patch_idx_b_yx = (curr_match[3] // num_patches, curr_match[3] % num_patches)
-
-                        crop_a = crop_a[patch_idx_a_yx[0] * patch_size_pixels: (patch_idx_a_yx[0] + 1) * (patch_size_pixels),
-                                 patch_idx_a_yx[1] * patch_size_pixels: (patch_idx_a_yx[1] + 1)* patch_size_pixels, :]
-                        crop_b = crop_b[patch_idx_b_yx[0] * patch_size_pixels: (patch_idx_b_yx[0] + 1) * patch_size_pixels,
-                        patch_idx_b_yx[1] * patch_size_pixels: (patch_idx_b_yx[1] + 1) * patch_size_pixels, :]
-                        break
-                    attached_crops = np.concatenate([crop_a, crop_b], axis=1)
-                    attached_crops = (attached_crops - np.min(attached_crops)) / (np.max(attached_crops) - np.min(attached_crops))
-                    loli =3
-                # # END - DEBUG CODE
+                # # # START - DEBUG CODE
+                # if lvl_idx == 3:
+                #     # Global - global matching
+                #     global_images = torch.cat([im.unsqueeze(1) for im in images[:2]], dim=1).view(-1, 3, 224,
+                #                                                                                   224).permute(0, 2, 3,
+                #                                                                                                1).cpu().numpy()
+                #     global_stitched = torch.cat([im for im in images[:2]]).permute(0, 2, 3, 1).contiguous().view(-1,
+                #                                                                                                  224,
+                #                                                                                                  3).cpu().numpy()
+                #     global_stitched = (global_stitched - np.min(global_stitched)) / (
+                #                 np.max(global_stitched) - np.min(global_stitched))
+                #     num_patches = patches_map[args.global_crop_size][lvl_idx]
+                #     crop_size = global_images.shape[-2]
+                #     patch_size_pixels = crop_size // num_patches
+                #     global_image_a = global_images[0].astype(np.float32)
+                #     global_image_a = (255 * (global_image_a - np.min(global_image_a)) / (
+                #                 np.max(global_image_a) - np.min(global_image_a))).astype(np.uint8)
+                #     global_image_b = global_images[1].astype(np.float32)
+                #     global_image_b = (255 * (global_image_b - np.min(global_image_b)) / (
+                #                 np.max(global_image_b) - np.min(global_image_b))).astype(np.uint8)
+                #     relevant_matches = [c for c in matches_global_global.numpy() if c[0] == 0 and c[2] == 1]
+                #     crops_arr = []
+                #     for curr_color, curr_match in zip([(255, 0, 0), (0, 255, 0), (0, 0, 255)], relevant_matches[:3]):
+                #         patch_idx_a_yx = (curr_match[1] // num_patches, curr_match[1] % num_patches)
+                #         patch_idx_b_yx = (curr_match[3] // num_patches, curr_match[3] % num_patches)
+                #         patch_a_coord = [patch_idx_a_yx[1] * patch_size_pixels, patch_idx_a_yx[0] * patch_size_pixels]
+                #         patch_a_coord += [patch_a_coord[0] + patch_size_pixels, patch_a_coord[1] + patch_size_pixels]
+                #         patch_b_coord = [patch_idx_b_yx[1] * patch_size_pixels, patch_idx_b_yx[0] * patch_size_pixels]
+                #         patch_b_coord += [patch_b_coord[0] + patch_size_pixels, patch_b_coord[1] + patch_size_pixels]
+                #         global_image_a = cv2.rectangle(np.ascontiguousarray(global_image_a),
+                #                                        (patch_a_coord[0], patch_a_coord[1]),
+                #                                        (patch_a_coord[2], patch_a_coord[3]), curr_color, 2)
+                #         global_image_b = cv2.rectangle(np.ascontiguousarray(global_image_b),
+                #                                        (patch_b_coord[0], patch_b_coord[1]),
+                #                                        (patch_b_coord[2], patch_b_coord[3]), curr_color, 2)
+                #         crop_a = global_image_a[patch_a_coord[1]: patch_a_coord[3],
+                #                  patch_a_coord[0]: patch_a_coord[2], :]
+                #         crop_b = global_image_b[patch_b_coord[1]: patch_b_coord[3],
+                #                  patch_b_coord[0]: patch_b_coord[2], :]
+                #         crops_arr.append(np.concatenate([crop_a, crop_b], axis=1))
+                #     global_image_stitched = np.concatenate([global_image_a, global_image_b], axis=1)
+                #     attached_crops = np.concatenate(crops_arr, axis=0)
+                #     loli = 3
+                #
+                #     # Global - local matching
+                #     local_images = torch.cat([im.unsqueeze(1) for im in images[2:]], dim=1).view(-1, 3, 96,
+                #                                                                                   96).permute(0, 2, 3,
+                #                                                                                                1).cpu().numpy()
+                #     local_stitched = torch.cat([im for im in images[2:]]).permute(0, 2, 3, 1).contiguous().view(-1,
+                #                                                                                                  96,
+                #                                                                                                  3).cpu().numpy()
+                #     local_stitched = (local_stitched - np.min(local_stitched)) / (
+                #                 np.max(local_stitched) - np.min(local_stitched))
+                #     num_local_patches = patches_map[args.local_crop_size][lvl_idx]
+                #     local_crop_size = local_images.shape[-2]
+                #     patch_size_pixels_local = local_crop_size // num_local_patches
+                #     global_image_b = global_images[0].astype(np.float32)
+                #     global_image_b = (255 * (global_image_b - np.min(global_image_b)) / (
+                #                 np.max(global_image_b) - np.min(global_image_b))).astype(np.uint8)
+                #     local_image_a = local_images[0].astype(np.float32)
+                #     local_image_a = (255 * (local_image_a - np.min(local_image_a)) / (
+                #                 np.max(local_image_a) - np.min(local_image_a))).astype(np.uint8)
+                #     relevant_matches = [c for c in matches_local_global.numpy() if c[0] == 0 and c[2] == 0]
+                #     crops_arr = []
+                #     for curr_color, curr_match in zip([(255, 0, 0), (0, 255, 0), (0, 0, 255)], relevant_matches[:3]):
+                #         patch_idx_a_yx = (curr_match[1] // num_local_patches, curr_match[1] % num_local_patches)
+                #         patch_idx_b_yx = (curr_match[3] // num_patches, curr_match[3] % num_patches)
+                #         patch_a_coord = [patch_idx_a_yx[1] * patch_size_pixels_local, patch_idx_a_yx[0] * patch_size_pixels_local]
+                #         patch_a_coord += [patch_a_coord[0] + patch_size_pixels_local, patch_a_coord[1] + patch_size_pixels_local]
+                #         patch_b_coord = [patch_idx_b_yx[1] * patch_size_pixels, patch_idx_b_yx[0] * patch_size_pixels]
+                #         patch_b_coord += [patch_b_coord[0] + patch_size_pixels, patch_b_coord[1] + patch_size_pixels]
+                #         local_image_a = cv2.rectangle(np.ascontiguousarray(local_image_a),
+                #                                        (patch_a_coord[0], patch_a_coord[1]),
+                #                                        (patch_a_coord[2], patch_a_coord[3]), curr_color, 2)
+                #         global_image_b = cv2.rectangle(np.ascontiguousarray(global_image_b),
+                #                                        (patch_b_coord[0], patch_b_coord[1]),
+                #                                        (patch_b_coord[2], patch_b_coord[3]), curr_color, 2)
+                #         crop_a = local_image_a[patch_a_coord[1]: patch_a_coord[3],
+                #                  patch_a_coord[0]: patch_a_coord[2], :]
+                #         crop_b = global_image_b[patch_b_coord[1]: patch_b_coord[3],
+                #                  patch_b_coord[0]: patch_b_coord[2], :]
+                #         crops_arr.append(np.concatenate([crop_a, crop_b], axis=1))
+                #     if len(crops_arr):
+                #         global_image_stitched = np.concatenate([cv2.copyMakeBorder(local_image_a, 0, 224-96, 0, 224-96, cv2.BORDER_CONSTANT), global_image_b], axis=1)
+                #         attached_crops = np.concatenate(crops_arr, axis=0)
+                #         loli = 3
+                # # # END - DEBUG CODE
 
                 # Take subset
                 for curr_matches, rel_matches in ((matches_local_global, relevant_matches_local_global),

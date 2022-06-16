@@ -59,9 +59,7 @@ class PatchMatcher:
         same_image_cond = torch.block_diag(*[torch.ones((num_crops_image_a, num_crops_image_b)) for _ in range(batch_size)]).to(non_empty_boxes)
         valid_boxes_cond = torch.logical_and(non_empty_boxes, same_image_cond)
 
-        valid_boxes_idx = torch.nonzero(valid_boxes_cond.view(-1), as_tuple=True)[0]
-        valid_boxes_idx_a = torch.floor(valid_boxes_idx / B)
-        valid_boxes_idx_b = valid_boxes_idx % B
+        valid_boxes_idx_a, valid_boxes_idx_b = torch.nonzero(valid_boxes_cond, as_tuple=True)
         box_a_coord_norm = box_a_coord_norm[valid_boxes_cond]
         box_b_coord_norm = box_b_coord_norm[valid_boxes_cond]
         return box_a_coord_norm, box_b_coord_norm, valid_boxes_idx_a, valid_boxes_idx_b  # This might be with zero dim if there are no intersections, we assume there is always at least one intersection

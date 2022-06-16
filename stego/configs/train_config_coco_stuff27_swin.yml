@@ -9,7 +9,7 @@ use_wandb: False
 
 # Loader params
 num_workers: 8
-max_steps: 5000
+max_steps: 50000
 
 
 num_neighbors: 7
@@ -25,13 +25,13 @@ loader_crop_type: "center"
 extra_clusters: 0
 use_true_labels: False
 use_recalibrator: False
-model_type: "vit_small"
-arch: "dino"
+model_type: "swin_small"
+arch: "swin"
 use_fit_model: False
 dino_feat_type: "feat"
 projection_type: "nonlinear"
 #projection_type: linear
-patch_size: 8
+patch_size: 4
 dino_patch_size: 8
 granularity: 1
 continuous: True
@@ -40,7 +40,7 @@ dropout: True
 zero_clamp: True
 
 lr: 5e-4
-pretrained_weights: ~
+pretrained_weights: "/home/almogdavid/workspace/dino/trained_models/swin_small_dino_loss_no_loss/training_swin_small_no_flip_20220609_175610/checkpoint.pth"
 use_salience: False
 stabalize: False
 stop_at_zero: True

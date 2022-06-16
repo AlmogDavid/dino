@@ -525,7 +525,7 @@ def cfg2dict(cfg: DictConfig) -> Dict:
     return cfg_dict
 
 
-@hydra.main(config_path="configs", config_name="train_config_coco_stuff27.yml")
+@hydra.main(config_path="configs", config_name="train_config_coco_stuff27_swin.yml")
 def my_app(cfg: DictConfig) -> None:
     if cfg.use_wandb:
         wandb.init(project="SSL_segmentation", sync_tensorboard=True)

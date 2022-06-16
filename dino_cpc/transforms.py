@@ -145,7 +145,7 @@ class RandomCropFlip(torch.nn.Module):
 
         return size
 
-    def __init__(self, size, patch_size: int, flip_prob: float = 0.5):
+    def __init__(self, size, patch_size: int, flip_prob: float = 0.0): # TODO: change to 0.5!!!!!!
         super().__init__()
 
         self.size = tuple(self._setup_size(

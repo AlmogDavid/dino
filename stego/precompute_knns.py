@@ -58,7 +58,7 @@ def my_app(cfg: DictConfig) -> None:
     elif cfg.arch == "swin":
         from modules import SwinFeaturizer, LambdaLayer
         no_ap_model = torch.nn.Sequential(
-            SwinFeaturizer(20, cfg),  # dim doesent matter
+            SwinFeaturizer(20*4, cfg),  # dim doesent matter
             LambdaLayer(lambda p: p[0]),
         ).cuda()
     else:
